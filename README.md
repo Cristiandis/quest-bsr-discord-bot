@@ -29,4 +29,4 @@ This is intended for Discord communities who play Oculus Quest version of Beat S
 - Run `npm install` or `node install.js` to install dependencies
 - To start the bot, run `npm start` or `node start.js`
 
-After the bot is connected, try to send a bsr command in your Discord server (for example `!bsr bd45`), the bot will automatically download the zip and save it to `/maps` folder. After the download is finished, the bot will reply informing that the song is added to the queue.
+After the bot is connected, try to send a bsr command in your Discord server (for example `!bsr bd45`), the bot will automatically download the zip and save it to `/maps` folder. After the download is finished, the bot will reply informing that the song is added to the queue, you will need to reload song list every new song added.
