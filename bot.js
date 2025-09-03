@@ -16,6 +16,7 @@ var questIpAddress = ``
 
 const pendingRequests = new Map()
 const pendingSearches = new Map()
+let globalCooldown = 0
 
 const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
@@ -80,9 +81,14 @@ function onMessageHandler(message) {
     console.log(`======\n* Received "${message.content}"`)
     const messageContent = message.content.trim()
     const username = message.author.username
+    const userId = message.author.id
 
-    if (processBsr(messageContent, username, message)) {
-    } else if (processSearch(messageContent, username, message)) {
+    if (config.cooldown.enabled && isOnGlobalCooldown(message)) {
+        return
+    }
+
+    if (processBsr(messageContent, username, message, userId)) {
+    } else if (processSearch(messageContent, username, message, userId)) {
     } else {
         console.log(`* This command is not handled`)
     }
@@ -100,9 +106,14 @@ async function onInteractionHandler(interaction) {
                 return
             }
 
+            if (interaction.user.id !== searchData.userId) {
+                await interaction.reply({ content: "Only the original requester can interact with this search.", flags: 64 })
+                return
+            }
+
             const selectedSong = searchData.results.find((song) => song.id === requestId)
             if (selectedSong) {
-                showSongApproval(selectedSong, searchData.username, interaction)
+                showSongApproval(selectedSong, searchData.username, interaction, searchData.userId)
             } else {
                 await interaction.reply({ content: "Song not found.", flags: 64 })
             }
@@ -113,6 +124,11 @@ async function onInteractionHandler(interaction) {
 
         if (!request) {
             await interaction.reply({ content: "This request has expired.", flags: 64 })
+            return
+        }
+
+        if (interaction.user.id !== request.userId) {
+            await interaction.reply({ content: "Only the original requester can interact with this request.", flags: 64 })
             return
         }
 
@@ -128,6 +144,8 @@ async function onInteractionHandler(interaction) {
                 components: [],
             })
         } else if (action === "reject") {
+            globalCooldown = 0
+
             const rejectedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
             .setColor(0xff0000)
             .setFooter({ text: `❌ Rejected by ${interaction.user.username}` })
@@ -142,7 +160,7 @@ async function onInteractionHandler(interaction) {
         pendingSearches.delete(requestId)
 }
 
-function processSearch(messageContent, username, message) {
+function processSearch(messageContent, username, message, userId) {
     const command = `!search`
     if (!messageContent.startsWith(command)) {
         return false
@@ -150,14 +168,15 @@ function processSearch(messageContent, username, message) {
 
     const query = messageContent.slice(command.length + 1)
     if (messageContent.charAt(command.length) == ` ` && query.length > 0) {
-        searchSongs(query, username, message)
+        setGlobalCooldown()
+        searchSongs(query, username, message, userId)
     } else {
         message.reply("Usage: `!search <song name or artist>`\nExample: `!search ghost expert+`")
     }
     return true
 }
 
-function searchSongs(query, username, message) {
+function searchSongs(query, username, message, userId) {
     const url = `https://api.beatsaver.com/search/text/0?q=${encodeURIComponent(query)}&sortOrder=Relevance`
 
     console.log(`* Searching for songs: "${query}"`)
@@ -205,6 +224,7 @@ function searchSongs(query, username, message) {
             pendingSearches.set(song.id, {
                 results: results,
                 username: username,
+                userId: userId,
             })
         })
 
@@ -216,7 +236,7 @@ function searchSongs(query, username, message) {
     })
 }
 
-function showSongApproval(songInfo, username, interaction) {
+function showSongApproval(songInfo, username, interaction, userId) {
     const versions = songInfo.versions[0]
     const downloadUrl = versions.downloadURL
     const fileName = sanitize(`${songInfo.id} ${username} ${songInfo.metadata.levelAuthorName} (${songInfo.name}).zip`)
@@ -246,12 +266,13 @@ function showSongApproval(songInfo, username, interaction) {
         fileName,
         hash: versions.hash,
         username,
+        userId: userId,
     })
 
     interaction.update({ embeds: [embed], components: [row] })
 }
 
-function processBsr(messageContent, username, message) {
+function processBsr(messageContent, username, message, userId) {
     const command = `!bsr`
     if (!messageContent.startsWith(command)) {
         return false
@@ -259,14 +280,15 @@ function processBsr(messageContent, username, message) {
 
     const arg = messageContent.slice(command.length + 1)
     if (messageContent.charAt(command.length) == ` ` && arg.length > 0) {
-        fetchMapInfo(arg, username, message)
+        setGlobalCooldown()
+        fetchMapInfo(arg, username, message, userId)
     } else {
         message.reply(config.message.manual)
     }
     return true
 }
 
-function fetchMapInfo(mapId, username, message) {
+function fetchMapInfo(mapId, username, message, userId) {
     const url = `https://api.beatsaver.com/maps/id/${mapId}`
 
     console.log(`* Getting map info...`)
@@ -302,6 +324,7 @@ function fetchMapInfo(mapId, username, message) {
             fileName,
             hash: versions.hash,
             username,
+            userId: userId,
         })
 
         message.reply({ embeds: [embed], components: [row] })
@@ -378,4 +401,32 @@ function pushMapToQuest(hash) {
              })
          },
     )
+}
+
+function isOnGlobalCooldown(messageOrInteraction) {
+    const now = Date.now()
+
+    if (globalCooldown && now < globalCooldown) {
+        const remainingTime = Math.ceil((globalCooldown - now) / 1000)
+
+        const replyContent = `⏰ Please wait ${remainingTime} seconds before making another request.`
+
+        if (messageOrInteraction.reply) {
+            messageOrInteraction.reply(replyContent)
+        } else {
+            messageOrInteraction.reply({
+                content: replyContent,
+                flags: 64,
+            })
+        }
+        return true
+    }
+
+    return false
+}
+
+function setGlobalCooldown() {
+    if (config.cooldown.enabled) {
+        globalCooldown = Date.now() + config.cooldown.duration
+    }
 }

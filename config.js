@@ -25,6 +25,10 @@ const config = {
     bot_options: {
         token: process.env.DISCORD_TOKEN
     },
+    cooldown: {
+        enabled: true,
+        duration: 30000,
+    },
     enable_automatic_upload_to_quest: true,
     adb_folder: getAdbFolder()
 };
