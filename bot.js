@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const fetch = require('node-fetch');
 const fs = require(`fs`);
 const sanitize = require(`sanitize-filename`);
@@ -9,10 +9,14 @@ const {resolve} = require("path");
 const path = require('path');
 const config = require('./config');
 
+// Platform-agnostic ADB executable path
 const adbExecutable = process.platform === 'win32' ? 'adb.exe' : 'adb';
 const adb = path.join(config.adb_folder, adbExecutable);
 var questConnected = false;
 var questIpAddress = ``;
+
+// Store pending requests
+const pendingRequests = new Map();
 
 const client = new Client({
     intents: [
@@ -24,6 +28,7 @@ const client = new Client({
 
 client.once('clientReady', onReadyHandler);
 client.on('messageCreate', onMessageHandler);
+client.on('interactionCreate', onInteractionHandler);
 client.login(config.bot_options.token);
 
 if (config.enable_automatic_upload_to_quest) {
@@ -83,6 +88,46 @@ function onMessageHandler(message) {
     } else { console.log(`* This command is not handled`); }
 }
 
+async function onInteractionHandler(interaction) {
+    if (!interaction.isButton()) return;
+
+    const [action, requestId] = interaction.customId.split('_');
+    const request = pendingRequests.get(requestId);
+
+    if (!request) {
+        await interaction.reply({ content: 'This request has expired.', ephemeral: true });
+        return;
+    }
+
+    if (action === 'approve') {
+        // Download the map
+        download(request.downloadUrl, request.fileName, request.hash, request.username, interaction);
+
+        // Update the embed to show approved status
+        const approvedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+        .setColor(0x00ff00)
+        .setFooter({ text: `✅ Approved by ${interaction.user.username}` });
+
+        await interaction.update({
+            embeds: [approvedEmbed],
+            components: []
+        });
+
+    } else if (action === 'reject') {
+        // Update the embed to show rejected status
+        const rejectedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+        .setColor(0xff0000)
+        .setFooter({ text: `❌ Rejected by ${interaction.user.username}` });
+
+        await interaction.update({
+            embeds: [rejectedEmbed],
+            components: []
+        });
+    }
+
+    // Clean up the pending request
+    pendingRequests.delete(requestId);
+}
 function processBsr(messageContent, username, message) {
     const command = `!bsr`;
     if (!messageContent.startsWith(command)) { return false; }
@@ -103,16 +148,56 @@ function fetchMapInfo(mapId, username, message) {
     fetch(url, { method: "GET", headers: { 'User-Agent': config.user_agent }})
     .then(res => res.json())
     .then(info => {
-        const versions = info.versions[0]
+        const versions = info.versions[0];
         const downloadUrl = versions.downloadURL;
         const fileName = sanitize(`${info.id} ${username} ${info.metadata.levelAuthorName} (${info.name}).zip`);
-        const responseMessage = `Requested "${info.metadata.songAuthorName}" - "${info.name}" by "${info.metadata.levelAuthorName}" (${info.id}). Successfully added to the queue.`;
-        download(downloadUrl, fileName, versions.hash, responseMessage, message);
+
+        const embed = new EmbedBuilder()
+        .setColor(0x0099ff)
+        .setTitle('🎵 Song Request')
+        .setThumbnail(versions.coverURL)
+        .addFields(
+            { name: '🎤 Artist', value: info.metadata.songAuthorName, inline: true },
+            { name: '🎵 Song', value: info.name, inline: true },
+            { name: '👤 Mapper', value: info.metadata.levelAuthorName, inline: true },
+            { name: '🆔 BSR Code', value: info.id, inline: true },
+            { name: '⭐ Rating', value: `${(info.stats.score * 100).toFixed(1)}%`, inline: true },
+                   { name: '⏱️ Duration', value: formatDuration(info.metadata.duration), inline: true }
+        )
+        .setFooter({ text: `Requested by ${username}` })
+        .setTimestamp();
+
+        const row = new ActionRowBuilder()
+        .addComponents(
+            new ButtonBuilder()
+            .setCustomId(`approve_${info.id}`)
+            .setLabel('✅ Approve')
+            .setStyle(ButtonStyle.Success),
+                       new ButtonBuilder()
+                       .setCustomId(`reject_${info.id}`)
+                       .setLabel('❌ Reject')
+                       .setStyle(ButtonStyle.Danger)
+        );
+
+        pendingRequests.set(info.id, {
+            downloadUrl,
+            fileName,
+            hash: versions.hash,
+            username
+        });
+
+        message.reply({ embeds: [embed], components: [row] });
     })
     .catch(err => console.log(err));
 }
 
-async function download(url, fileName, hash, responseMessage, message) {
+function formatDuration(seconds) {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+}
+
+async function download(url, fileName, hash, username, interaction) {
     await new Promise((resolve, reject) => {
         console.log(`* Downloading map...`);
         const mapsFolder = `maps`;
@@ -126,7 +211,16 @@ async function download(url, fileName, hash, responseMessage, message) {
         });
         fileStream.on("finish", function() {
             console.log(`* Downloaded "${fileName}"`);
-            message.reply(responseMessage);
+
+            const successEmbed = new EmbedBuilder()
+            .setColor(0x00ff00)
+            .setTitle('✅ Successfully Added to Queue')
+            .setDescription(`The song has been downloaded and added to the queue!`)
+            .setFooter({ text: `Downloaded for ${username}` })
+            .setTimestamp();
+
+            interaction.followUp({ embeds: [successEmbed] });
+
             if (questConnected) {
                 extractZip(hash, filePath);
             }
