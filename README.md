@@ -8,10 +8,12 @@ This is intended for Discord communities who play Oculus Quest version of Beat S
 ## Installation
 - Clone or download this repo (Code -> Download ZIP, then extract)
 - Copy `.env.example` to `.env` and add your Discord bot token:
+
   ```bash
   cp .env.example .env
   ```
   Then edit `.env` and replace `your_bot_token_here` with your actual bot token
+  
 - To get your Discord bot token:
   1. Go to https://discord.com/developers/applications
   2. Click "New Application" and give it a name
@@ -22,6 +24,7 @@ This is intended for Discord communities who play Oculus Quest version of Beat S
   7. In the "Bot" section, enable "Message Content Intent"
   8. Go to OAuth2 > URL Generator, select "bot" scope and "Send Messages" permission
   9. Use the generated URL to invite the bot to your Discord server
+  
 - Install [Node.js](https://nodejs.org/en/download/)
 - Run `npm install` or `node install.js` to install dependencies
 - To start the bot, run `npm start` or `node start.js`
