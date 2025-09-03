@@ -29,6 +29,12 @@ const config = {
         enabled: true,
         duration: 30000,
     },
+    admins: {
+        userIds: [
+            // "123456789012345678", // Replace with actual Discord user IDs
+            // "987654321098765432", // Add more admin IDs as needed
+        ],
+    },
     enable_automatic_upload_to_quest: true,
     adb_folder: getAdbFolder()
 };

@@ -84,8 +84,11 @@ function onMessageHandler(message) {
   const username = message.author.username
   const userId = message.author.id
 
+  const isAdmin = config.admins.userIds.includes(userId)
+
   if (
     config.cooldown.enabled &&
+    !isAdmin &&
     (messageContent.startsWith("!bsr") || messageContent.startsWith("!search")) &&
     isOnGlobalCooldown(message)
   ) {
@@ -95,6 +98,7 @@ function onMessageHandler(message) {
   if (processBsr(messageContent, username, message, userId)) {
   } else if (processSearch(messageContent, username, message, userId)) {
   } else if (processQueue(messageContent, message)) {
+  } else if (processClearQueue(messageContent, message, userId)) {
   } else {
     console.log(`* This command is not handled`)
   }
@@ -486,6 +490,33 @@ function processQueue(messageContent, message) {
       inline: false,
     })
   })
+
+  message.reply({ embeds: [embed] })
+  return true
+}
+
+function processClearQueue(messageContent, message, userId) {
+  const command = `!clearqueue`
+  if (!messageContent.startsWith(command)) {
+    return false
+  }
+
+  const isAdmin = config.admins.userIds.includes(userId)
+
+  if (!isAdmin) {
+    message.reply("❌ You don't have permission to use this command. Only admins can clear the queue.")
+    return true
+  }
+
+  const clearedCount = songQueue.length
+  songQueue.length = 0 // Clear the array
+
+  const embed = new EmbedBuilder()
+    .setColor(0xff6b35)
+    .setTitle("🗑️ Queue Cleared")
+    .setDescription(`Successfully cleared ${clearedCount} song(s) from the queue.`)
+    .setFooter({ text: `Cleared by ${message.author.username}` })
+    .setTimestamp()
 
   message.reply({ embeds: [embed] })
   return true
