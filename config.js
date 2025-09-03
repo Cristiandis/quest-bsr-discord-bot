@@ -18,9 +18,9 @@ function getAdbFolder() {
 }
 
 const config = {
-    user_agent: `Quest-BSR-Twitch-Bot/1.0.0 (+https://github.com/wilik16/quest-bsr-twitch-bot)`,
+    user_agent: `Quest-BSR-Discord-Bot/1.0.0 (+https://github.com/Cristiandis/quest-bsr-discord-bot)`,
     message: {
-        manual: `To request song, find a song at bsaber.com and click on twitch logo under a song to copy the code, then use !bsr <code> in chat. I made a video guide here https://imgur.com/a/a0s0qqa`
+        manual: `To request song, find a song at bsaber.com and click on twitch logo under a song to copy the code, then use !bsr <code> in chat.`
     },
     bot_options: {
         token: process.env.DISCORD_TOKEN
