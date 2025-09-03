@@ -1,4 +1,4 @@
-const tmi = require('tmi.js');
+const { Client, GatewayIntentBits } = require('discord.js');
 const fetch = require('node-fetch');
 const fs = require(`fs`);
 const sanitize = require(`sanitize-filename`);
@@ -6,19 +6,25 @@ const http = require('https');
 const { exec } = require("child_process");
 const extract = require('extract-zip');
 const {resolve} = require("path");
+const path = require('path');
 const config = require('./config');
 
-const adb = `${config.adb_folder}/adb`;
+const adbExecutable = process.platform === 'win32' ? 'adb.exe' : 'adb';
+const adb = path.join(config.adb_folder, adbExecutable);
 var questConnected = false;
 var questIpAddress = ``;
 
-const client = new tmi.client({
-    identity: { username: config.bot_options.username, password: config.bot_options.password },
-    channels: [config.bot_options.channel]
+const client = new Client({ 
+    intents: [
+        GatewayIntentBits.Guilds, 
+        GatewayIntentBits.GuildMessages, 
+        GatewayIntentBits.MessageContent
+    ] 
 });
-client.on('connected', onConnectedHandler);
-client.on('message', onMessageHandler);
-client.connect();
+
+client.once('ready', onReadyHandler);
+client.on('messageCreate', onMessageHandler);
+client.login(config.bot_options.token);
 
 if (config.enable_automatic_upload_to_quest) {
     getIpAddress();
@@ -62,35 +68,35 @@ function adbConnect(ipAddress) {
     });
 }
 
-function onConnectedHandler(addr, port) {
-    console.log(`* Connected to ${addr}:${port}`);
+function onReadyHandler() {
+    console.log(`* Bot logged in as ${client.user.tag}!`);
 }
 
-function onMessageHandler(channel, tags, rawMessage, self) {
-    if (self || rawMessage.charAt(0) != '!') { return; }
+function onMessageHandler(message) {
+    if (message.author.bot || !message.content.startsWith('!')) { return; }
 
-    console.log(`======\n* Received "${rawMessage}"`);
-    const message = rawMessage.trim();
-    const username = tags.username;
+    console.log(`======\n* Received "${message.content}"`);
+    const messageContent = message.content.trim();
+    const username = message.author.username;
 
-    if (processBsr(message, username, channel)) { 
+    if (processBsr(messageContent, username, message)) { 
     } else { console.log(`* This command is not handled`); }
 }
 
-function processBsr(message, username, channel) {
+function processBsr(messageContent, username, message) {
     const command = `!bsr`;
-    if (!message.startsWith(command)) { return false; }
+    if (!messageContent.startsWith(command)) { return false; }
 
-    const arg = message.slice(command.length + 1);
-    if (message.charAt(command.length) == ` ` && arg.length > 0) {
-        fetchMapInfo(arg, username, channel);
+    const arg = messageContent.slice(command.length + 1);
+    if (messageContent.charAt(command.length) == ` ` && arg.length > 0) {
+        fetchMapInfo(arg, username, message);
     } else {
-        client.say(channel, config.message.manual);
+        message.reply(config.message.manual);
     }
     return true;
 }
 
-function fetchMapInfo(mapId, username, channel) {
+function fetchMapInfo(mapId, username, message) {
     const url = `https://api.beatsaver.com/maps/id/${mapId}`;
 
     console.log(`* Getting map info...`);
@@ -100,13 +106,13 @@ function fetchMapInfo(mapId, username, channel) {
             const versions = info.versions[0]
             const downloadUrl = versions.downloadURL;
             const fileName = sanitize(`${info.id} ${username} ${info.metadata.levelAuthorName} (${info.name}).zip`);
-            const message = `@${username} requested "${info.metadata.songAuthorName}" - "${info.name}" by "${info.metadata.levelAuthorName}" (${info.id}). Successfully added to the queue.`;
-            download(downloadUrl, fileName, versions.hash, message, channel);
+            const responseMessage = `Requested "${info.metadata.songAuthorName}" - "${info.name}" by "${info.metadata.levelAuthorName}" (${info.id}). Successfully added to the queue.`;
+            download(downloadUrl, fileName, versions.hash, responseMessage, message);
         })
         .catch(err => console.log(err));
 }
 
-async function download(url, fileName, hash, message, channel) {
+async function download(url, fileName, hash, responseMessage, message) {
     await new Promise((resolve, reject) => {
         console.log(`* Downloading map...`);
         const mapsFolder = `maps`;
@@ -120,7 +126,7 @@ async function download(url, fileName, hash, message, channel) {
             });
         fileStream.on("finish", function() {
             console.log(`* Downloaded "${fileName}"`);
-            client.say(channel, message);
+            message.reply(responseMessage);
             if (questConnected) {
                 extractZip(hash, filePath);
             }
@@ -149,7 +155,6 @@ function pushMapToQuest(hash) {
             console.log(`- [PU]stderr: ${stderr}`);
             return;
         }
-        // console.log(`- [PU]output: ${stdout}`);
         console.log(`- Map uploaded to Quest`);
         fs.rmdir(`tmp/${hash}`, { recursive: true }, (err) => {
             if (err) { 

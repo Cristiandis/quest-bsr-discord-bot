@@ -1,20 +1,21 @@
 {
-  "name": "quest-bsr-twitch-bot",
+  "name": "quest-bsr-discord-bot",
   "version": "1.0.0",
-  "description": "Implementation of automatic Beat Saber custom song download requested by viewer from twitch chat. github.com/wilik16/quest-bsr-twitch-bot",
+  "description": "Implementation of automatic Beat Saber custom song download requested by users from Discord chat.",
   "main": "bot.js",
   "dependencies": {
+    "discord.js": "^14.22.1",
     "dotenv": "^10.0.0",
     "extract-zip": "^2.0.1",
     "https": "^1.0.0",
     "node-fetch": "^2.6.1",
-    "sanitize-filename": "^1.6.3",
-    "tmi.js": "^1.5.0"
+    "sanitize-filename": "^1.6.3"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "dev": "node bot.js"
   },
-  "author": "wilik16",
+  "author": "Cristiandis",
   "license": "ISC"
 }
