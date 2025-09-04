@@ -671,7 +671,7 @@ function pushPlaylistToQuest(localFilePath, fileName) {
   const questPlaylistPath = "/sdcard/ModData/com.beatgames.beatsaber/Mods/PlaylistManager/Playlists"
 
   exec(
-    `${adb} -s ${questIpAddress}:5555 push "${localFilePath}" "${questPlaylistPath}/${fileName}"`,
+    `${adb} -s ${questIpAddress}:5555 push --sync "${localFilePath}" "${questPlaylistPath}/${fileName}"`,
     (error, stdout, stderr) => {
       if (error) {
         console.log(`- [PL]error: ${error.message}`)
@@ -892,7 +892,7 @@ function pushMapToQuest(hash) {
   console.log(`- Uploading to Quest...`)
   const sourcePath = path.join("tmp", hash)
   exec(
-    `${adb} -s ${questIpAddress}:5555 push "${sourcePath}" /sdcard/ModData/com.beatgames.beatsaber/Mods/SongLoader/CustomLevels/${hash}`,
+    `${adb} -s ${questIpAddress}:5555 push --sync "${sourcePath}" /sdcard/ModData/com.beatgames.beatsaber/Mods/SongLoader/CustomLevels/${hash}`,
     (error, stdout, stderr) => {
       if (error) {
         console.log(`- [PU]error: ${error.message}`)
