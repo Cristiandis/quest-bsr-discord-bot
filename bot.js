@@ -162,12 +162,10 @@ async function onInteractionHandler(interaction) {
     interaction.customId.startsWith("next_") ||
     interaction.customId.startsWith("cancel_")
   ) {
-    // For pagination buttons, extract the full searchId after the action
     const parts = interaction.customId.split("_")
     action = parts[0]
-    requestId = parts.slice(1).join("_") // Rejoin all parts after the action to get full searchId
+    requestId = parts.slice(1).join("_")
   } else {
-    // For other buttons, use the original split logic
     ;[action, requestId] = interaction.customId.split("_")
   }
 
@@ -590,6 +588,10 @@ async function download(url, fileName, hash, username, channel) {
       songQueue.push(songData)
       console.log(`* Added "${songData.name}" to queue. Queue length: ${songQueue.length}`)
 
+      if (config.playlist.enabled) {
+        addToPlaylist(songData, hash)
+      }
+
       const successEmbed = new EmbedBuilder()
         .setColor(0x00ff00)
         .setTitle("✅ Successfully Added to Queue")
@@ -607,35 +609,79 @@ async function download(url, fileName, hash, username, channel) {
   })
 }
 
-async function extractZip(hash, source) {
+function addToPlaylist(songData, hash) {
   try {
-    await extract(source, { dir: resolve(path.join("tmp", hash)) })
-    pushMapToQuest(hash)
+    const localPlaylistPath = "playlists"
+
+    if (!fs.existsSync(localPlaylistPath)) {
+      fs.mkdirSync(localPlaylistPath, { recursive: true })
+    }
+
+    const playlistFileName = sanitize(`${config.playlist.name}.bplist`)
+    const localFilePath = path.join(localPlaylistPath, playlistFileName)
+
+    let playlist = {
+      playlistTitle: config.playlist.name,
+      playlistAuthor: config.playlist.author,
+      playlistDescription: config.playlist.description,
+      image: "",
+      songs: [],
+    }
+
+    if (fs.existsSync(localFilePath)) {
+      try {
+        const existingData = fs.readFileSync(localFilePath, "utf8")
+        playlist = JSON.parse(existingData)
+      } catch (err) {
+        console.log(`* Warning: Could not parse existing playlist, creating new one: ${err.message}`)
+      }
+    }
+
+    const existingSong = playlist.songs.find((song) => song.hash && song.hash.toLowerCase() === hash.toLowerCase())
+    if (existingSong) {
+      console.log(`* Song "${songData.name}" already exists in playlist, skipping`)
+      return
+    }
+
+    const playlistSong = {
+      hash: hash,
+      songName: songData.name,
+      key: songData.bsrCode,
+    }
+
+    playlist.songs.push(playlistSong)
+
+    const playlistJson = JSON.stringify(playlist, null, 2)
+    fs.writeFileSync(localFilePath, playlistJson, "utf8")
+
+    console.log(
+      `* Added "${songData.name}" to playlist "${config.playlist.name}" (${playlist.songs.length} songs total)`,
+    )
+
+    if (questConnected) {
+      pushPlaylistToQuest(localFilePath, playlistFileName)
+    }
   } catch (err) {
-    console.log("* Oops: extractZip failed", err)
+    console.log(`* Error adding song to playlist: ${err.message}`)
   }
 }
 
-function pushMapToQuest(hash) {
-  console.log(`- Uploading to Quest...`)
-  const sourcePath = path.join("tmp", hash)
+function pushPlaylistToQuest(localFilePath, fileName) {
+  console.log(`- Uploading playlist to Quest...`)
+  const questPlaylistPath = "/sdcard/ModData/com.beatgames.beatsaber/Mods/PlaylistManager/Playlists"
+
   exec(
-    `${adb} -s ${questIpAddress}:5555 push "${sourcePath}" /sdcard/ModData/com.beatgames.beatsaber/Mods/SongLoader/CustomLevels/${hash}`,
+    `${adb} -s ${questIpAddress}:5555 push "${localFilePath}" "${questPlaylistPath}/${fileName}"`,
     (error, stdout, stderr) => {
       if (error) {
-        console.log(`- [PU]error: ${error.message}`)
+        console.log(`- [PL]error: ${error.message}`)
         return
       }
       if (stderr) {
-        console.log(`- [PU]stderr: ${stderr}`)
+        console.log(`- [PL]stderr: ${stderr}`)
         return
       }
-      console.log(`- Map uploaded to Quest`)
-      fs.rm(path.join("tmp", hash), { recursive: true }, (err) => {
-        if (err) {
-          console.log(`- [EX]error: ${err.message}`)
-        }
-      })
+      console.log(`- Playlist "${fileName}" uploaded to Quest`)
     },
   )
 }
@@ -831,4 +877,37 @@ function endVoting(channel) {
   votingSuggestions.length = 0
   currentVoting = null
   userVotes.clear()
+}
+
+function extractZip(hash, source) {
+  try {
+    extract(source, { dir: resolve(path.join("tmp", hash)) })
+    pushMapToQuest(hash)
+  } catch (err) {
+    console.log("* Oops: extractZip failed", err)
+  }
+}
+
+function pushMapToQuest(hash) {
+  console.log(`- Uploading to Quest...`)
+  const sourcePath = path.join("tmp", hash)
+  exec(
+    `${adb} -s ${questIpAddress}:5555 push "${sourcePath}" /sdcard/ModData/com.beatgames.beatsaber/Mods/SongLoader/CustomLevels/${hash}`,
+    (error, stdout, stderr) => {
+      if (error) {
+        console.log(`- [PU]error: ${error.message}`)
+        return
+      }
+      if (stderr) {
+        console.log(`- [PU]stderr: ${stderr}`)
+        return
+      }
+      console.log(`- Map uploaded to Quest`)
+      fs.rm(path.join("tmp", hash), { recursive: true }, (err) => {
+        if (err) {
+          console.log(`- [EX]error: ${err.message}`)
+        }
+      })
+    },
+  )
 }

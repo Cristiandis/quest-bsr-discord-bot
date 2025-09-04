@@ -50,6 +50,12 @@ const config = {
         maxSuggestions: 5, // Number of suggestions before voting starts
         votingDuration: 10000, // voting time in milliseconds
     },
+    playlist: {
+        enabled: false, // WARNING: UNSTABLE
+        name: "Discord Bot Queue",
+        description: "Songs added through Discord bot",
+        author: "Discord Bot",
+    },
     enable_automatic_upload_to_quest: true,
     adb_folder: getAdbFolder()
 };

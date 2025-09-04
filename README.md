@@ -9,6 +9,7 @@ Quest BSR Discord Bot is an Oculus Quest Beat Saber song request bot that will d
 - **Voting System**: Optional voting system for song selection when enabled
 - **Admin Controls**: Admin-only commands and cooldown immunity
 - **Quest Integration**: Optional automatic upload to Oculus Quest via adb
+- **Playlist Integration**: Automatic playlist creation and upload to Quest (requires PlaylistManager mod)
 
 ## Background
 This is intended for Discord communities who play Oculus Quest version of Beat Saber.
@@ -61,6 +62,16 @@ adminUserIds: [               // Discord user IDs with admin privileges
 votingEnabled: false,         // Enable optional voting system
 votingDuration: 10000,          // Voting duration in milliseconds
 maxVotingSuggestions: 5      // Number of songs before voting starts
+```
+
+### Playlist Integration
+
+```javascript
+playlist: {
+  enabled: false,            // Enable automatic playlist creation and upload WARNING: UNSTABLE
+  name: 'Discord Requests',  // Playlist name in Beat Saber
+  description: 'Songs requested via Discord bot'  // Playlist description
+}
 ```
 
 ### Messages
