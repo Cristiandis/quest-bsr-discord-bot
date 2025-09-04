@@ -17,14 +17,24 @@ function getAdbFolder() {
     }
 }
 
+function validateCommandTrigger(trigger) {
+    const specialChars = /^[!$%^&*?~`|\\/+=\-_<>[\]{}()]+$/
+    if (!specialChars.test(trigger)) {
+        console.error(`Invalid command trigger "${trigger}". Only special characters are allowed.`)
+        return "!"
+    }
+    return trigger
+}
+
 const config = {
     user_agent: `Quest-BSR-Discord-Bot/1.0.0 (+https://github.com/Cristiandis/quest-bsr-discord-bot)`,
     message: {
-        manual: `To request song, find a song at bsaber.com and click on twitch logo under a song to copy the code, then use !bsr <code> in chat.`
+        manual: `To request song, find a song at bsaber.com and click on the ! on the side to copy the command.`
     },
     bot_options: {
         token: process.env.DISCORD_TOKEN
     },
+    commandTrigger: "!", // Only special characters are allowed: ! $ % ^ & * ? ~ ` | \ / + = - _ < > [ ] { } ( )
     cooldown: {
         enabled: true,
         duration: 30000,
@@ -43,5 +53,7 @@ const config = {
     enable_automatic_upload_to_quest: true,
     adb_folder: getAdbFolder()
 };
+
+config.commandTrigger = validateCommandTrigger(config.commandTrigger)
 
 module.exports = config;

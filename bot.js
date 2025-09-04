@@ -87,7 +87,7 @@ function onReadyHandler() {
 }
 
 function onMessageHandler(message) {
-  if (message.author.bot || !message.content.startsWith("!")) {
+  if (message.author.bot || !message.content.startsWith(config.commandTrigger)) {
     return
   }
 
@@ -102,7 +102,8 @@ function onMessageHandler(message) {
     config.cooldown.enabled &&
     !config.voting.enabled &&
     !isAdmin &&
-    (messageContent.startsWith("!bsr") || messageContent.startsWith("!search")) &&
+    (messageContent.startsWith(`${config.commandTrigger}bsr`) ||
+      messageContent.startsWith(`${config.commandTrigger}search`)) &&
     isOnGlobalCooldown(message)
   ) {
     return
@@ -228,7 +229,7 @@ async function onInteractionHandler(interaction) {
 }
 
 function processSearch(messageContent, username, message, userId) {
-  const command = `!search`
+  const command = `${config.commandTrigger}search`
   if (!messageContent.startsWith(command)) {
     return false
   }
@@ -335,11 +336,11 @@ function showSongApproval(songInfo, username, interaction, userId) {
     userId: userId,
   })
 
-  interaction.reply({ embeds: [embed], components: [row] })
+  interaction.reply({ embeds: [embed], components: [row], flags: 64 })
 }
 
 function processBsr(messageContent, username, message, userId) {
-  const command = `!bsr`
+  const command = `${config.commandTrigger}bsr`
   if (!messageContent.startsWith(command)) {
     return false
   }
@@ -524,7 +525,7 @@ function setGlobalCooldown() {
 }
 
 function processQueue(messageContent, message) {
-  const command = `!queue`
+  const command = `${config.commandTrigger}queue`
   if (!messageContent.startsWith(command)) {
     return false
   }
@@ -553,7 +554,7 @@ function processQueue(messageContent, message) {
 }
 
 function processClearQueue(messageContent, message, userId) {
-  const command = `!clearqueue`
+  const command = `${config.commandTrigger}clearqueue`
   if (!messageContent.startsWith(command)) {
     return false
   }
