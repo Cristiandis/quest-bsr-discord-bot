@@ -35,6 +35,11 @@ const config = {
             // "987654321098765432", // Add more admin IDs as needed
         ],
     },
+    voting: {
+        enabled: false, // Set to true to enable voting system
+        maxSuggestions: 5, // Number of suggestions before voting starts
+        votingDuration: 10000, // voting time in milliseconds
+    },
     enable_automatic_upload_to_quest: true,
     adb_folder: getAdbFolder()
 };

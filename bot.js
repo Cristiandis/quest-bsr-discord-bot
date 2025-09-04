@@ -1,4 +1,13 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js")
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
+} = require("discord.js")
 const fetch = require("node-fetch")
 const fs = require(`fs`)
 const sanitize = require(`sanitize-filename`)
@@ -18,6 +27,9 @@ const pendingRequests = new Map()
 const pendingSearches = new Map()
 let globalCooldown = 0
 const songQueue = []
+const votingSuggestions = []
+let currentVoting = null
+const userVotes = new Map()
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
@@ -88,6 +100,7 @@ function onMessageHandler(message) {
 
   if (
     config.cooldown.enabled &&
+    !config.voting.enabled &&
     !isAdmin &&
     (messageContent.startsWith("!bsr") || messageContent.startsWith("!search")) &&
     isOnGlobalCooldown(message)
@@ -105,6 +118,39 @@ function onMessageHandler(message) {
 }
 
 async function onInteractionHandler(interaction) {
+  if (interaction.isStringSelectMenu()) {
+    if (interaction.customId === "voting_select") {
+      if (!currentVoting) {
+        await interaction.reply({ content: "This voting has expired.", flags: 64 })
+        return
+      }
+
+      const userId = interaction.user.id
+      const selectedSongId = interaction.values[0]
+
+      if (userVotes.has(userId)) {
+        const previousVote = userVotes.get(userId)
+        userVotes.set(userId, selectedSongId)
+
+        const selectedSong = votingSuggestions.find((song) => song.id === selectedSongId)
+        await interaction.reply({
+          content: `🔄 Your vote has been changed to "${selectedSong.name}"!`,
+          flags: 64,
+        })
+        return
+      }
+
+      userVotes.set(userId, selectedSongId)
+
+      const selectedSong = votingSuggestions.find((song) => song.id === selectedSongId)
+      await interaction.reply({
+        content: `✅ Your vote for "${selectedSong.name}" has been recorded!`,
+        flags: 64,
+      })
+      return
+    }
+  }
+
   if (!interaction.isButton()) return
 
   const [action, requestId] = interaction.customId.split("_")
@@ -143,8 +189,6 @@ async function onInteractionHandler(interaction) {
   }
 
   if (action === "approve") {
-    download(request.downloadUrl, request.fileName, request.hash, request.username, interaction)
-
     const approvedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
       .setColor(0x00ff00)
       .setFooter({ text: `✅ Approved by ${interaction.user.username}` })
@@ -153,6 +197,19 @@ async function onInteractionHandler(interaction) {
       embeds: [approvedEmbed],
       components: [],
     })
+
+    if (config.voting.enabled) {
+      const embed = interaction.message.embeds[0]
+      const songData = {
+        name: embed.fields.find((f) => f.name === "🎵 Song")?.value || "Unknown",
+        artist: embed.fields.find((f) => f.name === "🎤 Artist")?.value || "Unknown",
+        mapper: embed.fields.find((f) => f.name === "👤 Mapper")?.value || "Unknown",
+        bsrCode: embed.fields.find((f) => f.name === "🆔 BSR Code")?.value || "Unknown",
+      }
+      addToVotingSuggestions(request, interaction.channel, songData)
+    } else {
+      download(request.downloadUrl, request.fileName, request.hash, request.username, interaction.channel)
+    }
   } else if (action === "reject") {
     globalCooldown = 0
 
@@ -176,12 +233,11 @@ function processSearch(messageContent, username, message, userId) {
     return false
   }
 
-  const query = messageContent.slice(command.length + 1)
-  if (messageContent.charAt(command.length) == ` ` && query.length > 0) {
-    setGlobalCooldown()
-    searchSongs(query, username, message, userId)
+  const arg = messageContent.slice(command.length + 1)
+  if (messageContent.charAt(command.length) == ` ` && arg.length > 0) {
+    searchSongs(arg, username, message, userId)
   } else {
-    message.reply("Usage: `!search <song name or artist>`\nExample: `!search ghost expert+`")
+    message.reply(config.message.manual)
   }
   return true
 }
@@ -279,7 +335,7 @@ function showSongApproval(songInfo, username, interaction, userId) {
     userId: userId,
   })
 
-  interaction.update({ embeds: [embed], components: [row] })
+  interaction.reply({ embeds: [embed], components: [row] })
 }
 
 function processBsr(messageContent, username, message, userId) {
@@ -290,7 +346,9 @@ function processBsr(messageContent, username, message, userId) {
 
   const arg = messageContent.slice(command.length + 1)
   if (messageContent.charAt(command.length) == ` ` && arg.length > 0) {
-    setGlobalCooldown()
+    if (!config.voting.enabled) {
+      setGlobalCooldown()
+    }
     fetchMapInfo(arg, username, message, userId)
   } else {
     message.reply(config.message.manual)
@@ -361,7 +419,7 @@ function formatDuration(seconds) {
   return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`
 }
 
-async function download(url, fileName, hash, username, interaction) {
+async function download(url, fileName, hash, username, channel) {
   await new Promise((resolve, reject) => {
     console.log(`* Downloading map...`)
     const mapsFolder = `maps`
@@ -376,12 +434,11 @@ async function download(url, fileName, hash, username, interaction) {
     fileStream.on("finish", () => {
       console.log(`* Downloaded "${fileName}"`)
 
-      const embed = interaction.message.embeds[0]
       const songData = {
-        name: embed.data.fields.find((f) => f.name === "🎵 Song")?.value || "Unknown",
-        artist: embed.data.fields.find((f) => f.name === "🎤 Artist")?.value || "Unknown",
-        mapper: embed.data.fields.find((f) => f.name === "👤 Mapper")?.value || "Unknown",
-        bsrCode: embed.data.fields.find((f) => f.name === "🆔 BSR Code")?.value || "Unknown",
+        name: fileName.split(" ").slice(2, -1).join(" ") || "Unknown",
+        artist: "Unknown",
+        mapper: "Unknown",
+        bsrCode: hash || "Unknown",
         username: username,
         addedAt: new Date(),
       }
@@ -395,7 +452,7 @@ async function download(url, fileName, hash, username, interaction) {
         .setFooter({ text: `Downloaded for ${username}` })
         .setTimestamp()
 
-      interaction.followUp({ embeds: [successEmbed] })
+      channel.send({ embeds: [successEmbed] })
 
       if (questConnected) {
         extractZip(hash, filePath)
@@ -520,4 +577,113 @@ function processClearQueue(messageContent, message, userId) {
 
   message.reply({ embeds: [embed] })
   return true
+}
+
+function addToVotingSuggestions(request, channel, songData) {
+  const votingSong = {
+    id: request.hash,
+    name: songData.name,
+    artist: songData.artist,
+    mapper: songData.mapper,
+    bsrCode: songData.bsrCode,
+    username: request.username,
+    downloadUrl: request.downloadUrl,
+    fileName: request.fileName,
+    hash: request.hash,
+    votes: 0,
+  }
+
+  votingSuggestions.push(votingSong)
+  console.log(
+    `* Added "${votingSong.name}" to voting suggestions. Count: ${votingSuggestions.length}/${config.voting.maxSuggestions}`,
+  )
+
+  if (votingSuggestions.length >= config.voting.maxSuggestions) {
+    startVoting(channel)
+  } else {
+    const remainingSlots = config.voting.maxSuggestions - votingSuggestions.length
+    channel.send({
+      content: `🗳️ Song added to voting pool! ${remainingSlots} more suggestion(s) needed to start voting.`,
+    })
+  }
+}
+
+function startVoting(channel) {
+  if (votingSuggestions.length === 0) return
+
+  userVotes.clear()
+  currentVoting = {
+    id: `voting_${Date.now()}`,
+    startTime: Date.now(),
+  }
+
+  const endTime = Math.floor((Date.now() + config.voting.votingDuration) / 1000)
+
+  const embed = new EmbedBuilder()
+    .setColor(0xff6b35)
+    .setTitle("🗳️ Song Voting Started!")
+    .setDescription(
+      `Vote for your favorite song using the dropdown below!\n⏰ Voting ends <t:${endTime}:R> (at <t:${endTime}:T>)\n\n*You can change your vote by selecting a different option.*`,
+    )
+    .setTimestamp()
+
+  const selectMenu = new StringSelectMenuBuilder()
+    .setCustomId("voting_select")
+    .setPlaceholder("Choose your favorite song...")
+
+  votingSuggestions.forEach((song, index) => {
+    embed.addFields({
+      name: `${index + 1}. ${song.name}`,
+      value: `**Artist:** ${song.artist}\n**Mapper:** ${song.mapper}\n**BSR:** ${song.bsrCode}\n**Suggested by:** ${song.username}`,
+      inline: false,
+    })
+
+    selectMenu.addOptions(
+      new StringSelectMenuOptionBuilder()
+        .setLabel(`${song.name}`)
+        .setDescription(`by ${song.artist} - mapped by ${song.mapper}`)
+        .setValue(song.id)
+        .setEmoji("🎵"),
+    )
+  })
+
+  const row = new ActionRowBuilder().addComponents(selectMenu)
+
+  channel.send({ embeds: [embed], components: [row] })
+
+  setTimeout(() => {
+    endVoting(channel)
+  }, config.voting.votingDuration)
+}
+
+function endVoting(channel) {
+  if (votingSuggestions.length === 0) return
+
+  votingSuggestions.forEach((song) => {
+    song.votes = Array.from(userVotes.values()).filter((voteId) => voteId === song.id).length
+  })
+
+  const winner = votingSuggestions.reduce((prev, current) => (prev.votes > current.votes ? prev : current))
+
+  const embed = new EmbedBuilder()
+    .setColor(0x00ff00)
+    .setTitle("🏆 Voting Results!")
+    .setDescription(`**Winner:** ${winner.name} by ${winner.artist} (${winner.votes} votes)`)
+    .setTimestamp()
+
+  votingSuggestions.forEach((song, index) => {
+    embed.addFields({
+      name: `${index + 1}. ${song.name} ${song === winner ? "🏆" : ""}`,
+      value: `**Votes:** ${song.votes}\n**Suggested by:** ${song.username}`,
+      inline: true,
+    })
+  })
+
+  channel.send({ embeds: [embed] })
+
+  download(winner.downloadUrl, winner.fileName, winner.hash, winner.username, channel)
+
+  votingSuggestions.length = 0
+  currentVoting = null
+  userVotes.clear()
 }
