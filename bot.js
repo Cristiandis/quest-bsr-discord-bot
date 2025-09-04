@@ -20,17 +20,21 @@ const config = require("./config")
 
 const adbExecutable = process.platform === "win32" ? "adb.exe" : "adb"
 const adb = path.join(config.adb_folder, adbExecutable)
-var questConnected = false
-var questIpAddress = ``
+const questPlaylistPath = "/sdcard/ModData/com.beatgames.beatsaber/Mods/PlaylistManager/Playlists"
 
-const pendingRequests = new Map()
-const pendingSearches = new Map()
-const searchPagination = new Map()
+let questConnected = false
+let questIpAddress = ``
 let globalCooldown = 0
-const songQueue = []
-const votingSuggestions = []
 let currentVoting = null
-const userVotes = new Map()
+
+const gameData = {
+  pendingRequests: new Map(),
+  pendingSearches: new Map(),
+  searchPagination: new Map(),
+  songQueue: [],
+  votingSuggestions: [],
+  userVotes: new Map(),
+}
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
@@ -42,39 +46,23 @@ client.on("interactionCreate", onInteractionHandler)
 client.login(config.bot_options.token)
 
 if (config.enable_automatic_upload_to_quest) {
-  getIpAddress()
+  initializeQuest()
 }
 
-function getIpAddress() {
+function initializeQuest() {
   console.log(`- Getting Quest IP Address...(make sure the Quest is connected via cable)`)
-  exec(`${adb} shell ip addr show wlan0`, (error, stdout, stderr) => {
-    if (error) {
-      console.log(`- [IP]error: ${error.message}`)
-      return
+  executeCommand(`${adb} shell ip addr show wlan0`, (stdout) => {
+    const ipAddress = stdout.match(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/)
+    if (ipAddress) {
+      console.log(`- Quest IP Address: ${ipAddress}`)
+      connectToQuest(ipAddress)
     }
-    if (stderr) {
-      console.log(`- [IP]stderr: ${stderr}`)
-      return
-    }
-    const r = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/
-    const ipAddress = stdout.match(r)
-    console.log(`- Quest IP Address: ${ipAddress}`)
-    adbConnect(ipAddress)
   })
 }
 
-function adbConnect(ipAddress) {
+function connectToQuest(ipAddress) {
   console.log(`- Connecting to Quest wirelessly...`)
-  exec(`${adb} tcpip 5555 && ${adb} connect ${ipAddress}:5555`, (error, stdout, stderr) => {
-    if (error) {
-      console.log(`- [CO]error: ${error.message}`)
-      return
-    }
-    if (stderr) {
-      console.log(`- [CO]stderr: ${stderr}`)
-      return
-    }
-    console.log(`- [CO]output: ${stdout}`)
+  executeCommand(`${adb} tcpip 5555 && ${adb} connect ${ipAddress}:5555`, (stdout) => {
     if (stdout.includes("connected to")) {
       questConnected = true
       questIpAddress = ipAddress
@@ -83,285 +71,265 @@ function adbConnect(ipAddress) {
   })
 }
 
+function executeCommand(command, onSuccess, onError = () => {}) {
+  exec(command, (error, stdout, stderr) => {
+    if (error || stderr) {
+      console.log(`- Command error: ${error?.message || stderr}`)
+      onError(error || stderr)
+      return
+    }
+    onSuccess(stdout)
+  })
+}
+
 function onReadyHandler() {
   console.log(`* Bot logged in as ${client.user.tag}!`)
 }
 
 function onMessageHandler(message) {
-  if (message.author.bot || !message.content.startsWith(config.commandTrigger)) {
-    return
-  }
+  if (message.author.bot || !message.content.startsWith(config.commandTrigger)) return
 
   console.log(`======\n* Received "${message.content}"`)
   const messageContent = message.content.trim()
-  const username = message.author.username
-  const userId = message.author.id
-
-  const isAdmin = config.admins.userIds.includes(userId)
-
-  if (
-    config.cooldown.enabled &&
-    !config.voting.enabled &&
-    !isAdmin &&
-    (messageContent.startsWith(`${config.commandTrigger}bsr`) ||
-      messageContent.startsWith(`${config.commandTrigger}search`)) &&
-    isOnGlobalCooldown(message)
-  ) {
-    return
+  const userContext = {
+    username: message.author.username,
+    userId: message.author.id,
+    isAdmin: config.admins.userIds.includes(message.author.id),
   }
 
-  if (processBsr(messageContent, username, message, userId)) {
-  } else if (processSearch(messageContent, username, message, userId)) {
-  } else if (processQueue(messageContent, message)) {
-  } else if (processClearQueue(messageContent, message, userId)) {
-  } else {
+  if (shouldApplyCooldown(messageContent, userContext) && isOnGlobalCooldown(message)) return
+
+  const commands = [
+    { handler: processBsr, needsCooldown: true },
+    { handler: processSearch, needsCooldown: true },
+    { handler: processQueue, needsCooldown: false },
+    { handler: processClearQueue, needsCooldown: false },
+  ]
+
+  const command = commands.find((cmd) => cmd.handler(messageContent, userContext, message))
+  if (!command) {
     console.log(`* This command is not handled`)
   }
 }
 
+function shouldApplyCooldown(messageContent, userContext) {
+  return (
+    config.cooldown.enabled &&
+    !config.voting.enabled &&
+    !userContext.isAdmin &&
+    (messageContent.startsWith(`${config.commandTrigger}bsr`) ||
+      messageContent.startsWith(`${config.commandTrigger}search`))
+  )
+}
+
 async function onInteractionHandler(interaction) {
   if (interaction.isStringSelectMenu()) {
-    if (interaction.customId === "voting_select") {
-      if (!currentVoting) {
-        await interaction.reply({ content: "This voting has expired.", flags: 64 })
-        return
-      }
-
-      const userId = interaction.user.id
-      const selectedSongId = interaction.values[0]
-
-      if (userVotes.has(userId)) {
-        const previousVote = userVotes.get(userId)
-        userVotes.set(userId, selectedSongId)
-
-        const selectedSong = votingSuggestions.find((song) => song.id === selectedSongId)
-        await interaction.reply({
-          content: `🔄 Your vote has been changed to "${selectedSong.name}"!`,
-          flags: 64,
-        })
-        return
-      }
-
-      userVotes.set(userId, selectedSongId)
-
-      const selectedSong = votingSuggestions.find((song) => song.id === selectedSongId)
-      await interaction.reply({
-        content: `✅ Your vote for "${selectedSong.name}" has been recorded!`,
-        flags: 64,
-      })
-      return
-    }
+    return handleVotingSelect(interaction)
   }
 
   if (!interaction.isButton()) return
 
-  let action, requestId
-
-  if (
-    interaction.customId.startsWith("prev_") ||
-    interaction.customId.startsWith("next_") ||
-    interaction.customId.startsWith("cancel_")
-  ) {
-    const parts = interaction.customId.split("_")
-    action = parts[0]
-    requestId = parts.slice(1).join("_")
-  } else {
-    ;[action, requestId] = interaction.customId.split("_")
+  const { action, requestId } = parseCustomId(interaction.customId)
+  const handlers = {
+    prev: () => handlePagination(interaction, action, requestId),
+    next: () => handlePagination(interaction, action, requestId),
+    cancel: () => handlePagination(interaction, action, requestId),
+    select: () => handleSongSelect(interaction, requestId),
+    approve: () => handleApproval(interaction, requestId, true),
+    reject: () => handleApproval(interaction, requestId, false),
   }
 
-  if (action === "prev" || action === "next" || action === "cancel") {
-    const searchData = searchPagination.get(requestId)
-
-    if (!searchData) {
-      await interaction.reply({ content: "This search has expired.", flags: 64 })
-      return
-    }
-
-    if (interaction.user.id !== searchData.userId) {
-      await interaction.reply({ content: "Only the original requester can interact with this search.", flags: 64 })
-      return
-    }
-
-    if (action === "cancel") {
-      searchPagination.delete(requestId)
-      searchData.allResults.forEach((song) => {
-        pendingSearches.delete(song.id)
-      })
-
-      try {
-        await interaction.update({
-          content: "🚫 Search cancelled.",
-          embeds: [],
-          components: [],
-        })
-      } catch (error) {
-        await interaction.followUp({ content: "🚫 Search cancelled.", flags: 64 })
-      }
-      return
-    }
-
-    const oldPage = searchData.currentPage
-    if (action === "prev") {
-      searchData.currentPage = Math.max(0, searchData.currentPage - 1)
-    } else if (action === "next") {
-      const maxPages = Math.ceil(searchData.allResults.length / 5)
-      searchData.currentPage = Math.min(maxPages - 1, searchData.currentPage + 1)
-    }
-
-    const oldStartIndex = oldPage * 5
-    const oldEndIndex = Math.min(oldStartIndex + 5, searchData.allResults.length)
-    const oldPageResults = searchData.allResults.slice(oldStartIndex, oldEndIndex)
-
-    oldPageResults.forEach((song) => {
-      pendingSearches.delete(song.id)
-    })
-
-    const { embed, components } = createSearchEmbed(searchData, requestId)
-
-    try {
-      await interaction.update({ embeds: [embed], components })
-    } catch (error) {
-      await interaction.followUp({ embeds: [embed], components, flags: 64 })
-    }
-    return
+  const handler = handlers[action]
+  if (handler) {
+    await handler()
   }
-
-  if (action === "select") {
-    const songId = requestId
-    const searchData = pendingSearches.get(songId)
-
-    if (!searchData) {
-      await interaction.reply({ content: "This search has expired.", flags: 64 })
-      return
-    }
-
-    if (interaction.user.id !== searchData.userId) {
-      await interaction.reply({ content: "Only the original requester can interact with this search.", flags: 64 })
-      return
-    }
-
-    let selectedSong = null
-    for (const [searchId, searchPagData] of searchPagination.entries()) {
-      if (searchPagData.userId === searchData.userId) {
-        selectedSong = searchPagData.allResults.find((song) => song.id === songId)
-        if (selectedSong) {
-          searchPagination.delete(searchId)
-          searchPagData.allResults.forEach((song) => {
-            pendingSearches.delete(song.id)
-          })
-          break
-        }
-      }
-    }
-
-    if (selectedSong) {
-      showSongApproval(selectedSong, searchData.username, interaction, searchData.userId)
-    } else {
-      await interaction.reply({ content: "Song not found.", flags: 64 })
-    }
-    return
-  }
-
-  const request = pendingRequests.get(requestId)
-
-  if (!request) {
-    await interaction.reply({ content: "This request has expired.", flags: 64 })
-    return
-  }
-
-  if (interaction.user.id !== request.userId) {
-    await interaction.reply({ content: "Only the original requester can interact with this request.", flags: 64 })
-    return
-  }
-
-  if (action === "approve") {
-    const approvedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-      .setColor(0x00ff00)
-      .setFooter({ text: `✅ Approved by ${interaction.user.username}` })
-
-    await interaction.update({
-      embeds: [approvedEmbed],
-      components: [],
-    })
-
-    if (config.voting.enabled) {
-      const embed = interaction.message.embeds[0]
-      const songData = {
-        name: embed.fields.find((f) => f.name === "🎵 Song")?.value || "Unknown",
-        artist: embed.fields.find((f) => f.name === "🎤 Artist")?.value || "Unknown",
-        mapper: embed.fields.find((f) => f.name === "👤 Mapper")?.value || "Unknown",
-        bsrCode: embed.fields.find((f) => f.name === "🆔 BSR Code")?.value || "Unknown",
-      }
-      addToVotingSuggestions(request, interaction.channel, songData)
-    } else {
-      download(request.downloadUrl, request.fileName, request.hash, request.username, interaction.channel)
-    }
-  } else if (action === "reject") {
-    globalCooldown = 0
-
-    const rejectedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-      .setColor(0xff0000)
-      .setFooter({ text: `❌ Rejected by ${interaction.user.username}` })
-
-    await interaction.update({
-      embeds: [rejectedEmbed],
-      components: [],
-    })
-  }
-
-  pendingRequests.delete(requestId)
-  pendingSearches.delete(requestId)
 }
 
-function processSearch(messageContent, username, message, userId) {
-  const command = `${config.commandTrigger}search`
-  if (!messageContent.startsWith(command)) {
-    return false
+function parseCustomId(customId) {
+  if (customId.startsWith("prev_") || customId.startsWith("next_") || customId.startsWith("cancel_")) {
+    const parts = customId.split("_")
+    return { action: parts[0], requestId: parts.slice(1).join("_") }
+  }
+  const [action, requestId] = customId.split("_")
+  return { action, requestId }
+}
+
+async function handleVotingSelect(interaction) {
+  if (!currentVoting) {
+    return interaction.reply({ content: "This voting has expired.", flags: 64 })
   }
 
-  const arg = messageContent.slice(command.length + 1)
-  if (messageContent.charAt(command.length) == ` ` && arg.length > 0) {
-    searchSongs(arg, username, message, userId)
+  const userId = interaction.user.id
+  const selectedSongId = interaction.values[0]
+  const selectedSong = gameData.votingSuggestions.find((song) => song.id === selectedSongId)
+
+  const wasChanged = gameData.userVotes.has(userId)
+  gameData.userVotes.set(userId, selectedSongId)
+
+  const message = wasChanged
+    ? `🔄 Your vote has been changed to "${selectedSong.name}"!`
+    : `✅ Your vote for "${selectedSong.name}" has been recorded!`
+
+  await interaction.reply({ content: message, flags: 64 })
+}
+
+async function handlePagination(interaction, action, requestId) {
+  const searchData = gameData.searchPagination.get(requestId)
+  if (!searchData || !validateUser(interaction, searchData.userId)) {
+    return sendExpiredMessage(interaction)
+  }
+
+  if (action === "cancel") {
+    return cancelSearch(interaction, requestId, searchData)
+  }
+
+  updateSearchPage(searchData, action)
+  const { embed, components } = createSearchEmbed(searchData, requestId)
+
+  try {
+    await interaction.update({ embeds: [embed], components })
+  } catch (error) {
+    await interaction.followUp({ embeds: [embed], components, flags: 64 })
+  }
+}
+
+function validateUser(interaction, expectedUserId) {
+  if (interaction.user.id !== expectedUserId) {
+    interaction.reply({ content: "Only the original requester can interact with this.", flags: 64 })
+    return false
+  }
+  return true
+}
+
+async function sendExpiredMessage(interaction) {
+  await interaction.reply({ content: "This request has expired.", flags: 64 })
+}
+
+async function cancelSearch(interaction, requestId, searchData) {
+  gameData.searchPagination.delete(requestId)
+  searchData.allResults.forEach((song) => gameData.pendingSearches.delete(song.id))
+
+  try {
+    await interaction.update({ content: "🚫 Search cancelled.", embeds: [], components: [] })
+  } catch (error) {
+    await interaction.followUp({ content: "🚫 Search cancelled.", flags: 64 })
+  }
+}
+
+function updateSearchPage(searchData, action) {
+  const oldPage = searchData.currentPage
+  const maxPages = Math.ceil(searchData.allResults.length / 5)
+
+  if (action === "prev") {
+    searchData.currentPage = Math.max(0, searchData.currentPage - 1)
+  } else if (action === "next") {
+    searchData.currentPage = Math.min(maxPages - 1, searchData.currentPage + 1)
+  }
+
+  const oldResults = searchData.allResults.slice(oldPage * 5, Math.min((oldPage + 1) * 5, searchData.allResults.length))
+  oldResults.forEach((song) => gameData.pendingSearches.delete(song.id))
+}
+
+async function handleSongSelect(interaction, songId) {
+  const searchData = gameData.pendingSearches.get(songId)
+  if (!searchData || !validateUser(interaction, searchData.userId)) {
+    return sendExpiredMessage(interaction)
+  }
+
+  const selectedSong = findAndCleanupSong(songId, searchData.userId)
+  if (selectedSong) {
+    showSongApproval(selectedSong, searchData.username, interaction, searchData.userId)
+  } else {
+    await interaction.reply({ content: "Song not found.", flags: 64 })
+  }
+}
+
+function findAndCleanupSong(songId, userId) {
+  for (const [searchId, searchPagData] of gameData.searchPagination.entries()) {
+    if (searchPagData.userId === userId) {
+      const selectedSong = searchPagData.allResults.find((song) => song.id === songId)
+      if (selectedSong) {
+        gameData.searchPagination.delete(searchId)
+        searchPagData.allResults.forEach((song) => gameData.pendingSearches.delete(song.id))
+        return selectedSong
+      }
+    }
+  }
+  return null
+}
+
+async function handleApproval(interaction, requestId, isApproved) {
+  const request = gameData.pendingRequests.get(requestId)
+  if (!request || !validateUser(interaction, request.userId)) {
+    return sendExpiredMessage(interaction)
+  }
+
+  const embed = EmbedBuilder.from(interaction.message.embeds[0])
+    .setColor(isApproved ? 0x00ff00 : 0xff0000)
+    .setFooter({ text: `${isApproved ? "✅ Approved" : "❌ Rejected"} by ${interaction.user.username}` })
+
+  await interaction.update({ embeds: [embed], components: [] })
+
+  if (isApproved) {
+    const songData = extractSongDataFromEmbed(interaction.message.embeds[0])
+
+    if (config.voting.enabled) {
+      addToVotingSuggestions(request, interaction.channel, songData)
+    } else {
+      download(request.downloadUrl, request.fileName, request.hash, request.username, interaction.channel, songData)
+    }
+  } else {
+    globalCooldown = 0
+  }
+
+  gameData.pendingRequests.delete(requestId)
+  gameData.pendingSearches.delete(requestId)
+}
+
+function extractSongDataFromEmbed(embed) {
+  return {
+    name: embed.fields.find((f) => f.name === "🎵 Song")?.value || "Unknown",
+    artist: embed.fields.find((f) => f.name === "🎤 Artist")?.value || "Unknown",
+    mapper: embed.fields.find((f) => f.name === "👤 Mapper")?.value || "Unknown",
+    bsrCode: embed.fields.find((f) => f.name === "🆔 BSR Code")?.value || "Unknown",
+  }
+}
+
+function processSearch(messageContent, userContext, message) {
+  const command = `${config.commandTrigger}search`
+  if (!messageContent.startsWith(command)) return false
+
+  const query = messageContent.slice(command.length + 1)
+  if (messageContent.charAt(command.length) === ` ` && query.length > 0) {
+    searchSongs(query, userContext, message)
   } else {
     message.reply(config.message.manual)
   }
   return true
 }
 
-function searchSongs(query, username, message, userId) {
-  const url = `https://api.beatsaver.com/search/text/0?q=${encodeURIComponent(query)}&sortOrder=Relevance`
-
+function searchSongs(query, userContext, message) {
   console.log(`* Searching for songs: "${query}"`)
-  fetch(url, { method: "GET", headers: { "User-Agent": config.user_agent } })
-    .then((res) => res.json())
+
+  fetchFromAPI(`https://api.beatsaver.com/search/text/0?q=${encodeURIComponent(query)}&sortOrder=Relevance`)
     .then((data) => {
-      if (!data.docs || data.docs.length === 0) {
+      if (!data.docs?.length) {
         message.reply(`No songs found for "${query}". Try different keywords!`)
         return
       }
 
-      const allResults = data.docs
       const searchId = `search_${Date.now()}`
-
       const searchData = {
-        allResults: allResults,
+        allResults: data.docs,
         currentPage: 0,
-        username: username,
-        userId: userId,
+        username: userContext.username,
+        userId: userContext.userId,
         query: query,
         totalResults: data.docs.length,
       }
 
-      searchPagination.set(searchId, searchData)
-
-      const currentPageResults = allResults.slice(0, 5)
-      currentPageResults.forEach((song) => {
-        pendingSearches.set(song.id, {
-          results: currentPageResults,
-          username: username,
-          userId: userId,
-        })
-      })
+      gameData.searchPagination.set(searchId, searchData)
+      updateSearchCache(searchData.allResults.slice(0, 5), userContext)
 
       const { embed, components } = createSearchEmbed(searchData, searchId)
       message.reply({ embeds: [embed], components })
@@ -370,6 +338,29 @@ function searchSongs(query, username, message, userId) {
       console.log("Search error:", err)
       message.reply("Sorry, there was an error searching for songs. Please try again!")
     })
+}
+
+async function fetchFromAPI(url) {
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { "User-Agent": config.user_agent },
+  })
+
+  if (!response.ok) {
+    throw new Error(`API request failed: ${response.status}`)
+  }
+
+  return response.json()
+}
+
+function updateSearchCache(results, userContext) {
+  results.forEach((song) => {
+    gameData.pendingSearches.set(song.id, {
+      results: results,
+      username: userContext.username,
+      userId: userContext.userId,
+    })
+  })
 }
 
 function createSearchEmbed(searchData, searchId) {
@@ -389,7 +380,6 @@ function createSearchEmbed(searchData, searchId) {
     .setTimestamp()
 
   currentPageResults.forEach((song, index) => {
-    const versions = song.versions[0]
     const rating = song.stats.score ? `${(song.stats.score * 100).toFixed(1)}%` : "N/A"
     const duration = formatDuration(song.metadata.duration)
     const globalIndex = startIndex + index + 1
@@ -401,29 +391,28 @@ function createSearchEmbed(searchData, searchId) {
     })
   })
 
+  const components = createSearchComponents(currentPageResults, searchId, currentPage, maxPages, startIndex)
+  updateSearchCache(currentPageResults, { username: searchData.username, userId: searchData.userId })
+
+  return { embed, components }
+}
+
+function createSearchComponents(results, searchId, currentPage, maxPages, startIndex) {
   const selectionRow = new ActionRowBuilder()
-  currentPageResults.forEach((song, index) => {
+  results.forEach((song, index) => {
     const globalIndex = startIndex + index + 1
     selectionRow.addComponents(
       new ButtonBuilder().setCustomId(`select_${song.id}`).setLabel(`${globalIndex}`).setStyle(ButtonStyle.Primary),
     )
   })
 
-  const navigationRow = new ActionRowBuilder()
-
-  navigationRow.addComponents(
+  const navigationRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`prev_${searchId}`)
       .setLabel("◀️ Previous")
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(currentPage === 0),
-  )
-
-  navigationRow.addComponents(
     new ButtonBuilder().setCustomId(`cancel_${searchId}`).setLabel("🚫 Cancel").setStyle(ButtonStyle.Danger),
-  )
-
-  navigationRow.addComponents(
     new ButtonBuilder()
       .setCustomId(`next_${searchId}`)
       .setLabel("Next ▶️")
@@ -431,28 +420,77 @@ function createSearchEmbed(searchData, searchId) {
       .setDisabled(currentPage >= maxPages - 1),
   )
 
-  currentPageResults.forEach((song) => {
-    pendingSearches.set(song.id, {
-      results: currentPageResults,
-      username: searchData.username,
-      userId: searchData.userId,
-    })
-  })
-
-  return {
-    embed,
-    components: [selectionRow, navigationRow],
-  }
+  return [selectionRow, navigationRow]
 }
 
 function showSongApproval(songInfo, username, interaction, userId) {
   const versions = songInfo.versions[0]
-  const downloadUrl = versions.downloadURL
   const fileName = sanitize(`${songInfo.id} ${username} ${songInfo.metadata.levelAuthorName} (${songInfo.name}).zip`)
 
-  const embed = new EmbedBuilder()
+  const embed = createSongEmbed(songInfo, versions, username, "🎵 Song Request (from search)")
+  const components = createApprovalComponents(songInfo.id)
+
+  gameData.pendingRequests.set(songInfo.id, {
+    downloadUrl: versions.downloadURL,
+    fileName,
+    hash: versions.hash,
+    username,
+    userId: userId,
+  })
+
+  interaction.reply({ embeds: [embed], components: [components], flags: 64 })
+}
+
+function processBsr(messageContent, userContext, message) {
+  const command = `${config.commandTrigger}bsr`
+  if (!messageContent.startsWith(command)) return false
+
+  const mapId = messageContent.slice(command.length + 1)
+  if (messageContent.charAt(command.length) === ` ` && mapId.length > 0) {
+    if (!config.voting.enabled) setGlobalCooldown()
+    fetchMapInfo(mapId, userContext, message)
+  } else {
+    message.reply(config.message.manual)
+  }
+  return true
+}
+
+async function fetchMapInfo(mapId, userContext, message) {
+  console.log(`* Getting map info...`)
+
+  try {
+    const info = await fetchFromAPI(`https://api.beatsaver.com/maps/id/${mapId}`)
+
+    if (!info?.versions?.length) {
+      throw new Error("Invalid song data received")
+    }
+
+    const versions = info.versions[0]
+    const fileName = sanitize(`${info.id} ${userContext.username} ${info.metadata.levelAuthorName} (${info.name}).zip`)
+
+    const embed = createSongEmbed(info, versions, userContext.username, "🎵 Song Request")
+    const components = createApprovalComponents(info.id)
+
+    gameData.pendingRequests.set(info.id, {
+      downloadUrl: versions.downloadURL,
+      fileName,
+      hash: versions.hash,
+      username: userContext.username,
+      userId: userContext.userId,
+    })
+
+    message.reply({ embeds: [embed], components: [components] })
+  } catch (err) {
+    console.log("BSR fetch error:", err)
+    globalCooldown = 0
+    message.reply(`❌ Could not find BSR code "${mapId}". Please check the code and try again!`)
+  }
+}
+
+function createSongEmbed(songInfo, versions, username, title) {
+  return new EmbedBuilder()
     .setColor(0x0099ff)
-    .setTitle("🎵 Song Request (from search)")
+    .setTitle(title)
     .setThumbnail(versions.coverURL)
     .addFields(
       { name: "🎤 Artist", value: songInfo.metadata.songAuthorName, inline: true },
@@ -462,98 +500,15 @@ function showSongApproval(songInfo, username, interaction, userId) {
       { name: "⭐ Rating", value: `${(songInfo.stats.score * 100).toFixed(1)}%`, inline: true },
       { name: "⏱️ Duration", value: formatDuration(songInfo.metadata.duration), inline: true },
     )
-    .setFooter({ text: `Selected by ${username}` })
+    .setFooter({ text: `${title.includes("search") ? "Selected" : "Requested"} by ${username}` })
     .setTimestamp()
+}
 
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`approve_${songInfo.id}`).setLabel("✅ Approve").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`reject_${songInfo.id}`).setLabel("❌ Reject").setStyle(ButtonStyle.Danger),
+function createApprovalComponents(songId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`approve_${songId}`).setLabel("✅ Approve").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`reject_${songId}`).setLabel("❌ Reject").setStyle(ButtonStyle.Danger),
   )
-
-  pendingRequests.set(songInfo.id, {
-    downloadUrl,
-    fileName,
-    hash: versions.hash,
-    username,
-    userId: userId,
-  })
-
-  interaction.reply({ embeds: [embed], components: [row], flags: 64 })
-}
-
-function processBsr(messageContent, username, message, userId) {
-  const command = `${config.commandTrigger}bsr`
-  if (!messageContent.startsWith(command)) {
-    return false
-  }
-
-  const arg = messageContent.slice(command.length + 1)
-  if (messageContent.charAt(command.length) == ` ` && arg.length > 0) {
-    if (!config.voting.enabled) {
-      setGlobalCooldown()
-    }
-    fetchMapInfo(arg, username, message, userId)
-  } else {
-    message.reply(config.message.manual)
-  }
-  return true
-}
-
-async function fetchMapInfo(mapId, username, message, userId) {
-  const url = `https://api.beatsaver.com/maps/id/${mapId}`
-
-  console.log(`* Getting map info...`)
-  fetch(url, { method: "GET", headers: { "User-Agent": config.user_agent } })
-    .then((res) => {
-      if (!res.ok) {
-        throw new Error(`BSR code not found: ${res.status}`)
-      }
-      return res.json()
-    })
-    .then((info) => {
-      if (!info || !info.versions || info.versions.length === 0) {
-        throw new Error("Invalid song data received")
-      }
-
-      const versions = info.versions[0]
-      const downloadUrl = versions.downloadURL
-      const fileName = sanitize(`${info.id} ${username} ${info.metadata.levelAuthorName} (${info.name}).zip`)
-
-      const embed = new EmbedBuilder()
-        .setColor(0x0099ff)
-        .setTitle("🎵 Song Request")
-        .setThumbnail(versions.coverURL)
-        .addFields(
-          { name: "🎤 Artist", value: info.metadata.songAuthorName, inline: true },
-          { name: "🎵 Song", value: info.name, inline: true },
-          { name: "👤 Mapper", value: info.metadata.levelAuthorName, inline: true },
-          { name: "🆔 BSR Code", value: info.id, inline: true },
-          { name: "⭐ Rating", value: `${(info.stats.score * 100).toFixed(1)}%`, inline: true },
-          { name: "⏱️ Duration", value: formatDuration(info.metadata.duration), inline: true },
-        )
-        .setFooter({ text: `Requested by ${username}` })
-        .setTimestamp()
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`approve_${info.id}`).setLabel("✅ Approve").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`reject_${info.id}`).setLabel("❌ Reject").setStyle(ButtonStyle.Danger),
-      )
-
-      pendingRequests.set(info.id, {
-        downloadUrl,
-        fileName,
-        hash: versions.hash,
-        username,
-        userId: userId,
-      })
-
-      message.reply({ embeds: [embed], components: [row] })
-    })
-    .catch((err) => {
-      console.log("BSR fetch error:", err)
-      globalCooldown = 0
-      message.reply(`❌ Could not find BSR code "${mapId}". Please check the code and try again!`)
-    })
 }
 
 function formatDuration(seconds) {
@@ -562,44 +517,32 @@ function formatDuration(seconds) {
   return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`
 }
 
-async function download(url, fileName, hash, username, channel) {
-  await new Promise((resolve, reject) => {
-    console.log(`* Downloading map...`)
-    const mapsFolder = `maps`
-    if (!fs.existsSync(mapsFolder)) {
-      fs.mkdirSync(mapsFolder)
-    }
-    const filePath = `${mapsFolder}/${fileName}`
+async function download(url, fileName, hash, username, channel, songData = null) {
+  console.log(`* Downloading map...`)
+
+  const mapsFolder = `maps`
+  ensureDirectoryExists(mapsFolder)
+
+  const filePath = `${mapsFolder}/${fileName}`
+
+  return new Promise((resolve) => {
     const fileStream = fs.createWriteStream(filePath)
-    http.get(`${url}`, (response) => {
-      response.pipe(fileStream)
-    })
+    http.get(url, (response) => response.pipe(fileStream))
+
     fileStream.on("finish", () => {
       console.log(`* Downloaded "${fileName}"`)
 
-      const songData = {
-        name: fileName.split(" ").slice(2, -1).join(" ") || "Unknown",
-        artist: "Unknown",
-        mapper: "Unknown",
-        bsrCode: hash || "Unknown",
-        username: username,
-        addedAt: new Date(),
-      }
-      songQueue.push(songData)
-      console.log(`* Added "${songData.name}" to queue. Queue length: ${songQueue.length}`)
+      const queueSongData = songData
+        ? createSongDataFromInfo(songData, username)
+        : createSongData(fileName, hash, username)
+      gameData.songQueue.push(queueSongData)
+      console.log(`* Added "${queueSongData.name}" to queue. Queue length: ${gameData.songQueue.length}`)
 
       if (config.playlist.enabled) {
-        addToPlaylist(songData, hash)
+        addToPlaylist(queueSongData, hash)
       }
 
-      const successEmbed = new EmbedBuilder()
-        .setColor(0x00ff00)
-        .setTitle("✅ Successfully Added to Queue")
-        .setDescription(`The song has been downloaded and added to the queue!\nQueue position: #${songQueue.length}`)
-        .setFooter({ text: `Downloaded for ${username}` })
-        .setTimestamp()
-
-      channel.send({ embeds: [successEmbed] })
+      sendSuccessMessage(channel, username, gameData.songQueue.length)
 
       if (questConnected) {
         extractZip(hash, filePath)
@@ -609,103 +552,120 @@ async function download(url, fileName, hash, username, channel) {
   })
 }
 
+function ensureDirectoryExists(dir) {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+}
+
+function createSongDataFromInfo(songData, username) {
+  return {
+    name: songData.name,
+    artist: songData.artist,
+    mapper: songData.mapper,
+    bsrCode: songData.bsrCode,
+    username: username,
+    addedAt: new Date(),
+  }
+}
+
+function createSongData(fileName, hash, username) {
+  return {
+    name: fileName.split(" ").slice(2, -1).join(" ") || "Unknown",
+    artist: "Unknown",
+    mapper: "Unknown",
+    bsrCode: hash || "Unknown",
+    username: username,
+    addedAt: new Date(),
+  }
+}
+
+function sendSuccessMessage(channel, username, queuePosition) {
+  const embed = new EmbedBuilder()
+    .setColor(0x00ff00)
+    .setTitle("✅ Successfully Added to Queue")
+    .setDescription(`The song has been downloaded and added to the queue!\nQueue position: #${queuePosition}`)
+    .setFooter({ text: `Downloaded for ${username}` })
+    .setTimestamp()
+
+  channel.send({ embeds: [embed] })
+}
+
 function addToPlaylist(songData, hash) {
   try {
     const localPlaylistPath = "playlists"
-
-    if (!fs.existsSync(localPlaylistPath)) {
-      fs.mkdirSync(localPlaylistPath, { recursive: true })
-    }
+    ensureDirectoryExists(localPlaylistPath)
 
     const playlistFileName = sanitize(`${config.playlist.name}.bplist`)
     const localFilePath = path.join(localPlaylistPath, playlistFileName)
 
-    let playlist = {
-      playlistTitle: config.playlist.name,
-      playlistAuthor: config.playlist.author,
-      playlistDescription: config.playlist.description,
-      image: "",
-      songs: [],
-    }
+    const playlist = loadOrCreatePlaylist(localFilePath)
 
-    if (fs.existsSync(localFilePath)) {
-      try {
-        const existingData = fs.readFileSync(localFilePath, "utf8")
-        playlist = JSON.parse(existingData)
-      } catch (err) {
-        console.log(`* Warning: Could not parse existing playlist, creating new one: ${err.message}`)
-      }
-    }
-
-    const existingSong = playlist.songs.find((song) => song.hash && song.hash.toLowerCase() === hash.toLowerCase())
-    if (existingSong) {
+    if (playlist.songs.find((song) => song.hash?.toLowerCase() === hash.toLowerCase())) {
       console.log(`* Song "${songData.name}" already exists in playlist, skipping`)
       return
     }
 
-    const playlistSong = {
+    playlist.songs.push({
       hash: hash,
       songName: songData.name,
       key: songData.bsrCode,
-    }
+    })
 
-    playlist.songs.push(playlistSong)
-
-    const playlistJson = JSON.stringify(playlist, null, 2)
-    fs.writeFileSync(localFilePath, playlistJson, "utf8")
-
+    fs.writeFileSync(localFilePath, JSON.stringify(playlist, null, 2), "utf8")
     console.log(
       `* Added "${songData.name}" to playlist "${config.playlist.name}" (${playlist.songs.length} songs total)`,
     )
 
     if (questConnected) {
-      pushPlaylistToQuest(localFilePath, playlistFileName)
+      pushToQuest(localFilePath, playlistFileName, questPlaylistPath)
     }
   } catch (err) {
     console.log(`* Error adding song to playlist: ${err.message}`)
   }
 }
 
-function pushPlaylistToQuest(localFilePath, fileName) {
-  console.log(`- Uploading playlist to Quest...`)
-  const questPlaylistPath = "/sdcard/ModData/com.beatgames.beatsaber/Mods/PlaylistManager/Playlists"
+function loadOrCreatePlaylist(filePath) {
+  const defaultPlaylist = {
+    playlistTitle: config.playlist.name,
+    playlistAuthor: config.playlist.author,
+    playlistDescription: config.playlist.description,
+    image: "",
+    songs: [],
+  }
 
-  exec(
-    `${adb} -s ${questIpAddress}:5555 push --sync "${localFilePath}" "${questPlaylistPath}/${fileName}"`,
-    (error, stdout, stderr) => {
-      if (error) {
-        console.log(`- [PL]error: ${error.message}`)
-        return
-      }
-      if (stderr) {
-        console.log(`- [PL]stderr: ${stderr}`)
-        return
-      }
-      console.log(`- Playlist "${fileName}" uploaded to Quest`)
-    },
+  if (!fs.existsSync(filePath)) return defaultPlaylist
+
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"))
+  } catch (err) {
+    console.log(`* Warning: Could not parse existing playlist, creating new one: ${err.message}`)
+    return defaultPlaylist
+  }
+}
+
+function pushToQuest(localPath, fileName, remotePath) {
+  console.log(`- Uploading to Quest...`)
+  executeCommand(
+    `${adb} -s ${questIpAddress}:5555 push --sync "${localPath}" "${remotePath}/${fileName}"`,
+    () => console.log(`- ${fileName} uploaded to Quest`),
+    (error) => console.log(`- Upload error: ${error}`),
   )
 }
 
 function isOnGlobalCooldown(messageOrInteraction) {
   const now = Date.now()
+  if (!globalCooldown || now >= globalCooldown) return false
 
-  if (globalCooldown && now < globalCooldown) {
-    const remainingTime = Math.ceil((globalCooldown - now) / 1000)
+  const remainingTime = Math.ceil((globalCooldown - now) / 1000)
+  const replyContent = `⏰ Please wait ${remainingTime} seconds before making another request.`
 
-    const replyContent = `⏰ Please wait ${remainingTime} seconds before making another request.`
-
-    if (messageOrInteraction.reply) {
-      messageOrInteraction.reply(replyContent)
-    } else {
-      messageOrInteraction.reply({
-        content: replyContent,
-        flags: 64,
-      })
-    }
-    return true
+  if (messageOrInteraction.reply) {
+    messageOrInteraction.reply(replyContent)
+  } else {
+    messageOrInteraction.reply({ content: replyContent, flags: 64 })
   }
-
-  return false
+  return true
 }
 
 function setGlobalCooldown() {
@@ -714,13 +674,11 @@ function setGlobalCooldown() {
   }
 }
 
-function processQueue(messageContent, message) {
+function processQueue(messageContent, userContext, message) {
   const command = `${config.commandTrigger}queue`
-  if (!messageContent.startsWith(command)) {
-    return false
-  }
+  if (!messageContent.startsWith(command)) return false
 
-  if (songQueue.length === 0) {
+  if (gameData.songQueue.length === 0) {
     message.reply("🎵 The queue is currently empty!")
     return true
   }
@@ -728,10 +686,10 @@ function processQueue(messageContent, message) {
   const embed = new EmbedBuilder()
     .setColor(0x9932cc)
     .setTitle("🎵 Current Song Queue")
-    .setDescription(`There are ${songQueue.length} song(s) in the queue:`)
+    .setDescription(`There are ${gameData.songQueue.length} song(s) in the queue:`)
     .setTimestamp()
 
-  songQueue.forEach((song, index) => {
+  gameData.songQueue.forEach((song, index) => {
     embed.addFields({
       name: `${index + 1}. ${song.name}`,
       value: `**Artist:** ${song.artist}\n**Mapper:** ${song.mapper}\n**BSR:** ${song.bsrCode}\n**Added by:** ${song.username}`,
@@ -743,21 +701,17 @@ function processQueue(messageContent, message) {
   return true
 }
 
-function processClearQueue(messageContent, message, userId) {
+function processClearQueue(messageContent, userContext, message) {
   const command = `${config.commandTrigger}clearqueue`
-  if (!messageContent.startsWith(command)) {
-    return false
-  }
+  if (!messageContent.startsWith(command)) return false
 
-  const isAdmin = config.admins.userIds.includes(userId)
-
-  if (!isAdmin) {
+  if (!userContext.isAdmin) {
     message.reply("❌ You don't have permission to use this command. Only admins can clear the queue.")
     return true
   }
 
-  const clearedCount = songQueue.length
-  songQueue.length = 0 // Clear the array
+  const clearedCount = gameData.songQueue.length
+  gameData.songQueue.length = 0
 
   const embed = new EmbedBuilder()
     .setColor(0xff6b35)
@@ -784,15 +738,15 @@ function addToVotingSuggestions(request, channel, songData) {
     votes: 0,
   }
 
-  votingSuggestions.push(votingSong)
+  gameData.votingSuggestions.push(votingSong)
   console.log(
-    `* Added "${votingSong.name}" to voting suggestions. Count: ${votingSuggestions.length}/${config.voting.maxSuggestions}`,
+    `* Added "${votingSong.name}" to voting suggestions. Count: ${gameData.votingSuggestions.length}/${config.voting.maxSuggestions}`,
   )
 
-  if (votingSuggestions.length >= config.voting.maxSuggestions) {
+  if (gameData.votingSuggestions.length >= config.voting.maxSuggestions) {
     startVoting(channel)
   } else {
-    const remainingSlots = config.voting.maxSuggestions - votingSuggestions.length
+    const remainingSlots = config.voting.maxSuggestions - gameData.votingSuggestions.length
     channel.send({
       content: `🗳️ Song added to voting pool! ${remainingSlots} more suggestion(s) needed to start voting.`,
     })
@@ -800,16 +754,20 @@ function addToVotingSuggestions(request, channel, songData) {
 }
 
 function startVoting(channel) {
-  if (votingSuggestions.length === 0) return
+  if (!gameData.votingSuggestions.length) return
 
-  userVotes.clear()
-  currentVoting = {
-    id: `voting_${Date.now()}`,
-    startTime: Date.now(),
-  }
+  gameData.userVotes.clear()
+  currentVoting = { id: `voting_${Date.now()}`, startTime: Date.now() }
 
   const endTime = Math.floor((Date.now() + config.voting.votingDuration) / 1000)
+  const embed = createVotingEmbed(endTime)
+  const selectMenu = createVotingSelectMenu()
 
+  channel.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(selectMenu)] })
+  setTimeout(() => endVoting(channel), config.voting.votingDuration)
+}
+
+function createVotingEmbed(endTime) {
   const embed = new EmbedBuilder()
     .setColor(0xff6b35)
     .setTitle("🗳️ Song Voting Started!")
@@ -818,65 +776,83 @@ function startVoting(channel) {
     )
     .setTimestamp()
 
-  const selectMenu = new StringSelectMenuBuilder()
-    .setCustomId("voting_select")
-    .setPlaceholder("Choose your favorite song...")
-
-  votingSuggestions.forEach((song, index) => {
+  gameData.votingSuggestions.forEach((song, index) => {
     embed.addFields({
       name: `${index + 1}. ${song.name}`,
       value: `**Artist:** ${song.artist}\n**Mapper:** ${song.mapper}\n**BSR:** ${song.bsrCode}\n**Suggested by:** ${song.username}`,
       inline: false,
     })
+  })
 
+  return embed
+}
+
+function createVotingSelectMenu() {
+  const selectMenu = new StringSelectMenuBuilder()
+    .setCustomId("voting_select")
+    .setPlaceholder("Choose your favorite song...")
+
+  gameData.votingSuggestions.forEach((song) => {
     selectMenu.addOptions(
       new StringSelectMenuOptionBuilder()
-        .setLabel(`${song.name}`)
+        .setLabel(song.name)
         .setDescription(`by ${song.artist} - mapped by ${song.mapper}`)
         .setValue(song.id)
         .setEmoji("🎵"),
     )
   })
 
-  const row = new ActionRowBuilder().addComponents(selectMenu)
-
-  channel.send({ embeds: [embed], components: [row] })
-
-  setTimeout(() => {
-    endVoting(channel)
-  }, config.voting.votingDuration)
+  return selectMenu
 }
 
 function endVoting(channel) {
-  if (votingSuggestions.length === 0) return
+  if (!gameData.votingSuggestions.length) return
 
-  votingSuggestions.forEach((song) => {
-    song.votes = Array.from(userVotes.values()).filter((voteId) => voteId === song.id).length
+  gameData.votingSuggestions.forEach((song) => {
+    song.votes = Array.from(gameData.userVotes.values()).filter((voteId) => voteId === song.id).length
   })
 
-  const winner = votingSuggestions.reduce((prev, current) => (prev.votes > current.votes ? prev : current))
+  const winner = gameData.votingSuggestions.reduce((prev, current) => (prev.votes > current.votes ? prev : current))
 
-  const embed = new EmbedBuilder()
-    .setColor(0x00ff00)
-    .setTitle("🏆 Voting Results!")
-    .setDescription(`**Winner:** ${winner.name} by ${winner.artist} (${winner.votes} votes)`)
-    .setTimestamp()
-
-  votingSuggestions.forEach((song, index) => {
-    embed.addFields({
-      name: `${index + 1}. ${song.name} ${song === winner ? "🏆" : ""}`,
-      value: `**Votes:** ${song.votes}\n**Suggested by:** ${song.username}`,
-      inline: true,
-    })
-  })
-
+  const embed = createVotingResultsEmbed(winner)
   channel.send({ embeds: [embed] })
 
-  download(winner.downloadUrl, winner.fileName, winner.hash, winner.username, channel)
+  const winnerSongData = {
+    name: winner.name,
+    artist: winner.artist,
+    mapper: winner.mapper,
+    bsrCode: winner.bsrCode,
+  }
+  download(winner.downloadUrl, winner.fileName, winner.hash, winner.username, channel, winnerSongData)
 
-  votingSuggestions.length = 0
+  gameData.votingSuggestions.length = 0
   currentVoting = null
-  userVotes.clear()
+  gameData.userVotes.clear()
+}
+
+function createVotingResultsEmbed(winner) {
+  const embed = new EmbedBuilder().setColor(0x00ff00).setTitle("🏆 Voting Results!").setTimestamp()
+
+  const sortedSongs = gameData.votingSuggestions.sort((a, b) => b.votes - a.votes)
+
+  embed.setDescription(
+    `**🏆 Winner: ${winner.name}** by ${winner.artist} (${winner.votes} vote${winner.votes !== 1 ? "s" : ""})\nMapped by ${winner.mapper} | BSR: ${winner.bsrCode}\nSuggested by: ${winner.username}`,
+  )
+
+  let resultsText = ""
+  sortedSongs.forEach((song, index) => {
+    const position = index + 1
+    const trophy = position === 1 ? "🏆" : position === 2 ? "🥈" : position === 3 ? "🥉" : `${position}.`
+    resultsText += `${trophy} **${song.name}** - ${song.votes} vote${song.votes !== 1 ? "s" : ""}\n`
+  })
+
+  embed.addFields({
+    name: "📊 Final Results",
+    value: resultsText,
+    inline: false,
+  })
+
+  return embed
 }
 
 function extractZip(hash, source) {
@@ -889,25 +865,17 @@ function extractZip(hash, source) {
 }
 
 function pushMapToQuest(hash) {
-  console.log(`- Uploading to Quest...`)
   const sourcePath = path.join("tmp", hash)
-  exec(
-    `${adb} -s ${questIpAddress}:5555 push --sync "${sourcePath}" /sdcard/ModData/com.beatgames.beatsaber/Mods/SongLoader/CustomLevels/${hash}`,
-    (error, stdout, stderr) => {
-      if (error) {
-        console.log(`- [PU]error: ${error.message}`)
-        return
-      }
-      if (stderr) {
-        console.log(`- [PU]stderr: ${stderr}`)
-        return
-      }
+  const targetPath = `/sdcard/ModData/com.beatgames.beatsaber/Mods/SongLoader/CustomLevels/${hash}`
+
+  executeCommand(
+    `${adb} -s ${questIpAddress}:5555 push --sync "${sourcePath}" ${targetPath}`,
+    () => {
       console.log(`- Map uploaded to Quest`)
       fs.rm(path.join("tmp", hash), { recursive: true }, (err) => {
-        if (err) {
-          console.log(`- [EX]error: ${err.message}`)
-        }
+        if (err) console.log(`- Cleanup error: ${err.message}`)
       })
     },
+    (error) => console.log(`- Upload error: ${error}`),
   )
 }
