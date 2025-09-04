@@ -25,6 +25,7 @@ var questIpAddress = ``
 
 const pendingRequests = new Map()
 const pendingSearches = new Map()
+const searchPagination = new Map()
 let globalCooldown = 0
 const songQueue = []
 const votingSuggestions = []
@@ -154,10 +155,25 @@ async function onInteractionHandler(interaction) {
 
   if (!interaction.isButton()) return
 
-  const [action, requestId] = interaction.customId.split("_")
+  let action, requestId
 
-  if (action === "select") {
-    const searchData = pendingSearches.get(requestId)
+  if (
+    interaction.customId.startsWith("prev_") ||
+    interaction.customId.startsWith("next_") ||
+    interaction.customId.startsWith("cancel_")
+  ) {
+    // For pagination buttons, extract the full searchId after the action
+    const parts = interaction.customId.split("_")
+    action = parts[0]
+    requestId = parts.slice(1).join("_") // Rejoin all parts after the action to get full searchId
+  } else {
+    // For other buttons, use the original split logic
+    ;[action, requestId] = interaction.customId.split("_")
+  }
+
+  if (action === "prev" || action === "next" || action === "cancel") {
+    const searchData = searchPagination.get(requestId)
+
     if (!searchData) {
       await interaction.reply({ content: "This search has expired.", flags: 64 })
       return
@@ -168,7 +184,78 @@ async function onInteractionHandler(interaction) {
       return
     }
 
-    const selectedSong = searchData.results.find((song) => song.id === requestId)
+    if (action === "cancel") {
+      searchPagination.delete(requestId)
+      searchData.allResults.forEach((song) => {
+        pendingSearches.delete(song.id)
+      })
+
+      try {
+        await interaction.update({
+          content: "🚫 Search cancelled.",
+          embeds: [],
+          components: [],
+        })
+      } catch (error) {
+        await interaction.followUp({ content: "🚫 Search cancelled.", flags: 64 })
+      }
+      return
+    }
+
+    const oldPage = searchData.currentPage
+    if (action === "prev") {
+      searchData.currentPage = Math.max(0, searchData.currentPage - 1)
+    } else if (action === "next") {
+      const maxPages = Math.ceil(searchData.allResults.length / 5)
+      searchData.currentPage = Math.min(maxPages - 1, searchData.currentPage + 1)
+    }
+
+    const oldStartIndex = oldPage * 5
+    const oldEndIndex = Math.min(oldStartIndex + 5, searchData.allResults.length)
+    const oldPageResults = searchData.allResults.slice(oldStartIndex, oldEndIndex)
+
+    oldPageResults.forEach((song) => {
+      pendingSearches.delete(song.id)
+    })
+
+    const { embed, components } = createSearchEmbed(searchData, requestId)
+
+    try {
+      await interaction.update({ embeds: [embed], components })
+    } catch (error) {
+      await interaction.followUp({ embeds: [embed], components, flags: 64 })
+    }
+    return
+  }
+
+  if (action === "select") {
+    const songId = requestId
+    const searchData = pendingSearches.get(songId)
+
+    if (!searchData) {
+      await interaction.reply({ content: "This search has expired.", flags: 64 })
+      return
+    }
+
+    if (interaction.user.id !== searchData.userId) {
+      await interaction.reply({ content: "Only the original requester can interact with this search.", flags: 64 })
+      return
+    }
+
+    let selectedSong = null
+    for (const [searchId, searchPagData] of searchPagination.entries()) {
+      if (searchPagData.userId === searchData.userId) {
+        selectedSong = searchPagData.allResults.find((song) => song.id === songId)
+        if (selectedSong) {
+          searchPagination.delete(searchId)
+          searchPagData.allResults.forEach((song) => {
+            pendingSearches.delete(song.id)
+          })
+          break
+        }
+      }
+    }
+
     if (selectedSong) {
       showSongApproval(selectedSong, searchData.username, interaction, searchData.userId)
     } else {
@@ -255,52 +342,109 @@ function searchSongs(query, username, message, userId) {
         return
       }
 
-      const results = data.docs.slice(0, 5)
+      const allResults = data.docs
       const searchId = `search_${Date.now()}`
 
-      const embed = new EmbedBuilder()
-        .setColor(0x9932cc)
-        .setTitle("🔍 Song Search Results")
-        .setDescription(`Found ${data.docs.length} songs for "${query}". Showing top 5 results:`)
-        .setFooter({ text: `Search by ${username}` })
-        .setTimestamp()
+      const searchData = {
+        allResults: allResults,
+        currentPage: 0,
+        username: username,
+        userId: userId,
+        query: query,
+        totalResults: data.docs.length,
+      }
 
-      results.forEach((song, index) => {
-        const versions = song.versions[0]
-        const rating = song.stats.score ? `${(song.stats.score * 100).toFixed(1)}%` : "N/A"
-        const duration = formatDuration(song.metadata.duration)
+      searchPagination.set(searchId, searchData)
 
-        embed.addFields({
-          name: `${index + 1}. ${song.name}`,
-          value: `**Artist:** ${song.metadata.songAuthorName}\n**Mapper:** ${song.metadata.levelAuthorName}\n**BSR:** ${song.id} | **Rating:** ${rating} | **Duration:** ${duration}`,
-          inline: false,
-        })
-      })
-
-      const row = new ActionRowBuilder()
-      results.forEach((song, index) => {
-        row.addComponents(
-          new ButtonBuilder()
-            .setCustomId(`select_${song.id}`)
-            .setLabel(`${index + 1}`)
-            .setStyle(ButtonStyle.Primary),
-        )
-      })
-
-      results.forEach((song) => {
+      const currentPageResults = allResults.slice(0, 5)
+      currentPageResults.forEach((song) => {
         pendingSearches.set(song.id, {
-          results: results,
+          results: currentPageResults,
           username: username,
           userId: userId,
         })
       })
 
-      message.reply({ embeds: [embed], components: [row] })
+      const { embed, components } = createSearchEmbed(searchData, searchId)
+      message.reply({ embeds: [embed], components })
     })
     .catch((err) => {
       console.log("Search error:", err)
       message.reply("Sorry, there was an error searching for songs. Please try again!")
     })
+}
+
+function createSearchEmbed(searchData, searchId) {
+  const { allResults, currentPage, username, query, totalResults } = searchData
+  const startIndex = currentPage * 5
+  const endIndex = Math.min(startIndex + 5, allResults.length)
+  const currentPageResults = allResults.slice(startIndex, endIndex)
+  const maxPages = Math.ceil(allResults.length / 5)
+
+  const embed = new EmbedBuilder()
+    .setColor(0x9932cc)
+    .setTitle("🔍 Song Search Results")
+    .setDescription(
+      `Found ${totalResults} songs for "${query}"\nPage ${currentPage + 1} of ${maxPages} (showing ${startIndex + 1}-${endIndex} of ${totalResults})`,
+    )
+    .setFooter({ text: `Search by ${username}` })
+    .setTimestamp()
+
+  currentPageResults.forEach((song, index) => {
+    const versions = song.versions[0]
+    const rating = song.stats.score ? `${(song.stats.score * 100).toFixed(1)}%` : "N/A"
+    const duration = formatDuration(song.metadata.duration)
+    const globalIndex = startIndex + index + 1
+
+    embed.addFields({
+      name: `${globalIndex}. ${song.name}`,
+      value: `**Artist:** ${song.metadata.songAuthorName}\n**Mapper:** ${song.metadata.levelAuthorName}\n**BSR:** ${song.id} | **Rating:** ${rating} | **Duration:** ${duration}`,
+      inline: false,
+    })
+  })
+
+  const selectionRow = new ActionRowBuilder()
+  currentPageResults.forEach((song, index) => {
+    const globalIndex = startIndex + index + 1
+    selectionRow.addComponents(
+      new ButtonBuilder().setCustomId(`select_${song.id}`).setLabel(`${globalIndex}`).setStyle(ButtonStyle.Primary),
+    )
+  })
+
+  const navigationRow = new ActionRowBuilder()
+
+  navigationRow.addComponents(
+    new ButtonBuilder()
+      .setCustomId(`prev_${searchId}`)
+      .setLabel("◀️ Previous")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(currentPage === 0),
+  )
+
+  navigationRow.addComponents(
+    new ButtonBuilder().setCustomId(`cancel_${searchId}`).setLabel("🚫 Cancel").setStyle(ButtonStyle.Danger),
+  )
+
+  navigationRow.addComponents(
+    new ButtonBuilder()
+      .setCustomId(`next_${searchId}`)
+      .setLabel("Next ▶️")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(currentPage >= maxPages - 1),
+  )
+
+  currentPageResults.forEach((song) => {
+    pendingSearches.set(song.id, {
+      results: currentPageResults,
+      username: searchData.username,
+      userId: searchData.userId,
+    })
+  })
+
+  return {
+    embed,
+    components: [selectionRow, navigationRow],
+  }
 }
 
 function showSongApproval(songInfo, username, interaction, userId) {
