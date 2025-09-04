@@ -17,9 +17,9 @@ This is intended for Discord communities who play Oculus Quest version of Beat S
 - Clone or download this repo (Code -> Download ZIP, then extract)
 - Copy `.env.example` to `.env` and add your Discord bot token:
 
-  \`\`\`bash
+  ```bash
   cp .env.example .env
-  \`\`\`
+  ```
   Then edit `.env` and replace `your_bot_token_here` with your actual bot token
   
 - To get your Discord bot token:
@@ -42,26 +42,26 @@ This is intended for Discord communities who play Oculus Quest version of Beat S
 Edit `config.js` to customize the bot behavior:
 
 ### Basic Settings
-\`\`\`javascript
+```javascript
 commandTrigger: '!',           // Command prefix (only special characters allowed)
 cooldownEnabled: true,         // Enable/disable cooldown system
 cooldownDuration: 30000,          // Cooldown duration in milliseconds 
-\`\`\`
+```
 
 ### Admin Settings
-\`\`\`javascript
+```javascript
 adminUserIds: [               // Discord user IDs with admin privileges
   '123456789012345678',       // Replace with actual Discord user IDs
   '987654321098765432'
 ],
-\`\`\`
+```
 
 ### Voting System
-\`\`\`javascript
+```javascript
 votingEnabled: false,         // Enable optional voting system
 votingDuration: 10000,          // Voting duration in milliseconds
 maxVotingSuggestions: 5      // Number of songs before voting starts
-\`\`\`
+```
 
 ### Messages
 Customize bot response messages in the `messages` object within `config.js`.
