@@ -866,7 +866,7 @@ function extractZip(hash, source) {
 
 function pushMapToQuest(hash) {
   const sourcePath = path.join("tmp", hash)
-  const targetPath = `/sdcard/ModData/com.beatgames.beatsaber/Mods/SongLoader/CustomLevels/${hash}`
+  const targetPath = `/sdcard/ModData/com.beatgames.beatsaber/Mods/SongCore/CustomLevels/${hash}`
 
   executeCommand(
     `${adb} -s ${questIpAddress}:5555 push --sync "${sourcePath}" ${targetPath}`,
